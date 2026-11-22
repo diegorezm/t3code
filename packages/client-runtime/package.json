@@ -7,6 +7,10 @@
       "types": "./src/pullRequestDiffFold.ts",
       "default": "./src/pullRequestDiffFold.ts"
     },
+    "./state/objects": {
+      "types": "./src/state/objects.ts",
+      "default": "./src/state/objects.ts"
+    },
     "./assembly-highlighting": {
       "types": "./src/assemblyHighlighting.ts",
       "default": "./src/assemblyHighlighting.ts"

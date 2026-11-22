@@ -834,6 +834,23 @@ export function summarizeT3ToolCalls(
           );
       break;
     }
+    case "t3-object": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Updated {count} T3 Object} other {Updated {count} T3 Objects}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to update {count} T3 Object} other {Tried to update {count} T3 Objects}}",
+              { count },
+            ),
+          );
+      break;
+    }
     case "send-to-user": {
       const count = selected.length;
       label = done

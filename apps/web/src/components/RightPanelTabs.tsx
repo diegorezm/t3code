@@ -51,6 +51,7 @@ import {
   Globe2,
   MessagesSquare,
   Plus,
+  Shapes,
   TerminalSquare,
   Volume2Icon,
   VolumeOffIcon,
@@ -620,6 +621,8 @@ function surfaceTitle(
     case "issue":
       // A git host numbers its issues; a tracker with keys of its own, such as Linear, names them.
       return /^\d+$/.test(surface.key) ? `#${surface.key}` : surface.key;
+    case "object":
+      return surface.title ?? resolve(msg("Design Object"));
     case "device":
       return surface.title ?? surface.target?.name ?? resolve(msg("Device"));
     case "thread":
@@ -720,6 +723,8 @@ function SurfaceIcon({
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
     case "issue":
       return <IssueSurfaceIcon surface={surface} environmentId={environmentId} />;
+    case "object":
+      return <Shapes className="size-3 shrink-0" />;
     case "thread":
       return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} />;
     case "linked-thread":

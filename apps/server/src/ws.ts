@@ -130,6 +130,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as T3Objects from "./objects/T3ObjectService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -1490,6 +1491,7 @@ export const layerWsRpc = (
       const threadViewers = yield* ThreadViewers.ThreadViewers;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const t3Objects = yield* T3Objects.T3ObjectService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -2388,6 +2390,45 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
           ),
+        [WS_METHODS.objectsList]: (input) => t3Objects.list(input),
+        [WS_METHODS.objectsRead]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.read(input)),
+          ),
+        [WS_METHODS.objectsCreate]: (input) => t3Objects.create({ ...input, actor: "user" }),
+        [WS_METHODS.objectsRename]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.rename(input)),
+          ),
+        [WS_METHODS.objectsSetArchived]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.setArchived(input)),
+          ),
+        [WS_METHODS.objectsDelete]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.delete(input)),
+          ),
+        [WS_METHODS.objectsMutateDesign]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.mutateDesign({ ...input, actor: "user" })),
+          ),
+        [WS_METHODS.objectsReplaceDesign]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.replaceDesign({ ...input, actor: "user" })),
+          ),
+        [WS_METHODS.objectsListRevisions]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.listRevisions(input)),
+          ),
+        [WS_METHODS.objectsReadRevision]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.readRevision(input)),
+          ),
+        [WS_METHODS.objectsRestoreRevision]: (input) =>
+          Effect.annotateCurrentSpan({ "t3_object.id": input.id }).pipe(
+            Effect.andThen(t3Objects.restoreRevision({ ...input, actor: "user" })),
+          ),
+        [WS_METHODS.objectsSubscribe]: (input) => t3Objects.subscribe(input),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({

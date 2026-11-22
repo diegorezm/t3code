@@ -3,7 +3,13 @@ import {
   scopedThreadKey,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { EnvironmentId, RunId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  RunId,
+  T3ObjectId,
+  ThreadId,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { msg } from "gt-react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -30,6 +36,7 @@ const RIGHT_PANEL_KINDS = [
   "pull-request",
   "pull-requests",
   "issue",
+  "object",
   "thread",
   "linked-thread",
 ] as const;
@@ -102,6 +109,13 @@ export type RightPanelSurface =
       scope: string;
       key: string;
       url?: string;
+    }
+  | {
+      id: `object:${string}`;
+      kind: "object";
+      objectId: T3ObjectId;
+      environmentId?: EnvironmentId;
+      title?: string;
     }
   /**
    * A thread of the panel's environment shown beside it: a side chat or a subagent. Which one is
@@ -187,7 +201,7 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     kind: Exclude<
       RightPanelKind,
-      "file" | "terminal" | "pull-request" | "issue" | "thread" | "linked-thread"
+      "file" | "terminal" | "pull-request" | "issue" | "object" | "thread" | "linked-thread"
     >,
   ) => void;
   /** Opens a side chat or subagent of `ref`'s environment as a tab; `ref` itself has no tab. */
@@ -223,6 +237,14 @@ interface RightPanelStoreState {
     },
   ) => void;
   openIssue: (ref: ScopedThreadRef, target: IssueSurfaceTarget) => void;
+  openObject: (
+    ref: ScopedThreadRef,
+    target: {
+      objectId: T3ObjectId;
+      environmentId?: EnvironmentId;
+      title?: string;
+    },
+  ) => void;
   setPullRequestDetailTab: (
     ref: ScopedThreadRef,
     surfaceId: string,
@@ -261,7 +283,7 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     kind: Exclude<
       RightPanelKind,
-      "file" | "terminal" | "pull-request" | "issue" | "thread" | "linked-thread"
+      "file" | "terminal" | "pull-request" | "issue" | "object" | "thread" | "linked-thread"
     >,
   ) => void;
   setThreadPanelOpen: (
@@ -287,7 +309,14 @@ const DEFAULT_THREAD_PANEL_VISIBILITY: ThreadPanelVisibility = {
 const singletonSurface = (
   kind: Exclude<
     RightPanelKind,
-    "file" | "preview" | "terminal" | "pull-request" | "issue" | "thread" | "linked-thread"
+    | "file"
+    | "preview"
+    | "terminal"
+    | "pull-request"
+    | "issue"
+    | "object"
+    | "thread"
+    | "linked-thread"
   >,
 ): RightPanelSurface => {
   switch (kind) {
@@ -677,6 +706,22 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                         }),
                       ];
                     }
+                    if (surface.kind === "object") {
+                      if (typeof surface.objectId !== "string" || surface.objectId.length === 0) {
+                        return [];
+                      }
+                      return [
+                        {
+                          id: `object:${surface.objectId}` as const,
+                          kind: "object" as const,
+                          objectId: T3ObjectId.make(surface.objectId),
+                          ...(typeof surface.environmentId === "string"
+                            ? { environmentId: EnvironmentId.make(surface.environmentId) }
+                            : {}),
+                          ...(typeof surface.title === "string" ? { title: surface.title } : {}),
+                        },
+                      ];
+                    }
                     if (surface.kind !== "terminal") return [surface];
                     if (
                       !("resourceId" in surface) ||
@@ -970,6 +1015,27 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                   ),
                 }
               : next;
+          }),
+        ),
+      openObject: (ref, target) =>
+        set((state) =>
+          automaticUpdate(state, scopedThreadKey(ref), (current) => {
+            const surface: RightPanelSurface = {
+              id: `object:${target.objectId}`,
+              kind: "object",
+              objectId: target.objectId,
+              ...(target.environmentId !== undefined
+                ? { environmentId: target.environmentId }
+                : {}),
+              ...(target.title !== undefined ? { title: target.title } : {}),
+            };
+            const next = upsertSurface(current, surface);
+            return {
+              ...next,
+              surfaces: next.surfaces.map((entry) =>
+                entry.id === surface.id ? { ...entry, ...surface } : entry,
+              ),
+            };
           }),
         ),
       setPullRequestDetailTab: (ref, surfaceId, detailTab) =>

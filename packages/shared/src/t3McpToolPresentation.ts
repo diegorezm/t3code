@@ -88,6 +88,7 @@ export type T3McpToolSummaryAction =
   | "device"
   | "html-preview"
   | "html-render"
+  | "t3-object"
   | "send-to-user";
 
 export interface T3McpToolDefinition {
@@ -439,6 +440,14 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_send_attachments: tool(["Send", "Sending", "Sent", "attachments"], "attachment-send"),
   html_preview: tool(["Preview", "Previewing", "Previewed", "an HTML page"], "html-preview"),
   html_render: tool(["Render", "Rendering", "Rendered", "an HTML page"], "html-render"),
+  t3_object_list: tool(["List", "Listing", "Listed", "T3 Objects"], "t3-object"),
+  t3_object_create: tool(["Create", "Creating", "Created", "a T3 Object"], "t3-object"),
+  t3_object_read: tool(["Inspect", "Inspecting", "Inspected", "a T3 Object"], "t3-object"),
+  t3_object_open: tool(["Open", "Opening", "Opened", "a T3 Object"], "t3-object"),
+  t3_object_delete: tool(["Remove", "Removing", "Removed", "a T3 Object"], "t3-object"),
+  design_mutate: tool(["Update", "Updating", "Updated", "a design canvas"], "t3-object"),
+  design_revisions: tool(["Manage", "Managing", "Managed", "design revisions"], "t3-object"),
+  design_screenshot: tool(["Capture", "Capturing", "Captured", "a design screenshot"], "t3-object"),
   send_to_user: tool(["Send", "Sending", "Sent", "a message"], "send-to-user"),
 };
 

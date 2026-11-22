@@ -96,6 +96,13 @@ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { MessageToolkit } from "./toolkits/message/tools.ts";
 import * as MessageHandlers from "./toolkits/message/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import * as ObjectsHandlers from "./toolkits/objects/handlers.ts";
+import {
+  DesignScreenshotTool,
+  DesignScreenshotToolkit,
+  ObjectsStandardToolkit,
+} from "./toolkits/objects/tools.ts";
+import * as T3Objects from "../objects/T3ObjectService.ts";
 import { MCP_HTTP_PATH } from "../httpCors.ts";
 import { requestUrl } from "../requestUrl.ts";
 
@@ -968,6 +975,31 @@ const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(funct
   );
 });
 
+const registerDesignScreenshot = Effect.fn("McpHttpServer.registerDesignScreenshot")(function* () {
+  const objects = yield* T3Objects.T3ObjectService;
+  const htmlRender = yield* HtmlRender.HtmlRender;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const built = yield* decodeAsAdvertised(DesignScreenshotToolkit);
+  yield* registerImageTool(
+    DesignScreenshotTool,
+    (payload) =>
+      built
+        .handle("design_screenshot", payload)
+        .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
+    (effect) =>
+      effect.pipe(
+        Effect.provideService(T3Objects.T3ObjectService, objects),
+        Effect.provideService(HtmlRender.HtmlRender, htmlRender),
+        Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+      ),
+    "screenshot",
+    (error) =>
+      isOrchestratorMcpFailure(error) || AiError.isAiError(error)
+        ? error.message
+        : "Design screenshot failed.",
+  );
+});
+
 /**
  * Tools that hand work to another thread's agent: they create it, message it,
  * steer it, or move context into it. Their events name the receiving agent too.
@@ -1278,6 +1310,15 @@ export const layerHtmlToolkit = Layer.mergeAll(
   imageToolRegistration(registerHtmlPreview(), HtmlHandlers.layerPreview),
 ).pipe(Layer.provide(HtmlRender.layer));
 
+export const layerObjectsToolkitWithoutHtmlRender = Layer.mergeAll(
+  toolkitRegistration(ObjectsStandardToolkit, ObjectsHandlers.layerStandard),
+  imageToolRegistration(registerDesignScreenshot(), ObjectsHandlers.layerScreenshot),
+);
+
+const layerObjectsToolkit = layerObjectsToolkitWithoutHtmlRender.pipe(
+  Layer.provide(HtmlRender.layer),
+);
+
 const layerPreviewStandardToolkitRegistration = toolkitRegistration(
   PreviewStandardToolkit,
   PreviewHandlers.layerStandard,
@@ -1394,6 +1435,7 @@ export const layerTools = Layer.mergeAll(
   layerIssuesToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,
+  layerObjectsToolkit,
   layerMessageToolkit,
 );
 

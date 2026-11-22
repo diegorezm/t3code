@@ -161,6 +161,9 @@ export async function reopenClosedView(
     case "issue":
       panels.openIssue(ref, surface);
       break;
+    case "object":
+      panels.openObject(ref, surface);
+      break;
     case "thread":
       panels.openThread(ref, surface.threadId);
       break;

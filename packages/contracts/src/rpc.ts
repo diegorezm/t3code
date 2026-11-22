@@ -1,4 +1,26 @@
 import {
+  T3ObjectCreateInput,
+  T3ObjectDeleteInput,
+  T3ObjectDeleteResult,
+  T3ObjectError,
+  T3ObjectListInput,
+  T3ObjectListResult,
+  T3ObjectListRevisionsInput,
+  T3ObjectListRevisionsResult,
+  T3ObjectMutateDesignInput,
+  T3ObjectMutationResult,
+  T3ObjectReadInput,
+  T3ObjectReadResult,
+  T3ObjectReadRevisionInput,
+  T3ObjectReadRevisionResult,
+  T3ObjectRenameInput,
+  T3ObjectReplaceDesignInput,
+  T3ObjectRestoreRevisionInput,
+  T3ObjectSetArchivedInput,
+  T3ObjectStreamEvent,
+  T3ObjectSubscribeInput,
+} from "./t3Object.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -626,6 +648,19 @@ export const WS_METHODS = {
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  objectsList: "objects.list",
+  objectsRead: "objects.read",
+  objectsCreate: "objects.create",
+  objectsRename: "objects.rename",
+  objectsSetArchived: "objects.setArchived",
+  objectsDelete: "objects.delete",
+  objectsMutateDesign: "objects.mutateDesign",
+  objectsReplaceDesign: "objects.replaceDesign",
+  objectsListRevisions: "objects.listRevisions",
+  objectsReadRevision: "objects.readRevision",
+  objectsRestoreRevision: "objects.restoreRevision",
+  objectsSubscribe: "objects.subscribe",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -2351,6 +2386,79 @@ const WsScheduledTasksGetWebhookDeliveryRpc = Rpc.make(
   },
 );
 
+const WsObjectsListRpc = Rpc.make(WS_METHODS.objectsList, {
+  payload: T3ObjectListInput,
+  success: T3ObjectListResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsReadRpc = Rpc.make(WS_METHODS.objectsRead, {
+  payload: T3ObjectReadInput,
+  success: T3ObjectReadResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsCreateRpc = Rpc.make(WS_METHODS.objectsCreate, {
+  payload: T3ObjectCreateInput,
+  success: T3ObjectMutationResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsRenameRpc = Rpc.make(WS_METHODS.objectsRename, {
+  payload: T3ObjectRenameInput,
+  success: T3ObjectReadResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsSetArchivedRpc = Rpc.make(WS_METHODS.objectsSetArchived, {
+  payload: T3ObjectSetArchivedInput,
+  success: T3ObjectReadResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsDeleteRpc = Rpc.make(WS_METHODS.objectsDelete, {
+  payload: T3ObjectDeleteInput,
+  success: T3ObjectDeleteResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsMutateDesignRpc = Rpc.make(WS_METHODS.objectsMutateDesign, {
+  payload: T3ObjectMutateDesignInput,
+  success: T3ObjectMutationResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsReplaceDesignRpc = Rpc.make(WS_METHODS.objectsReplaceDesign, {
+  payload: T3ObjectReplaceDesignInput,
+  success: T3ObjectMutationResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsListRevisionsRpc = Rpc.make(WS_METHODS.objectsListRevisions, {
+  payload: T3ObjectListRevisionsInput,
+  success: T3ObjectListRevisionsResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsReadRevisionRpc = Rpc.make(WS_METHODS.objectsReadRevision, {
+  payload: T3ObjectReadRevisionInput,
+  success: T3ObjectReadRevisionResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsRestoreRevisionRpc = Rpc.make(WS_METHODS.objectsRestoreRevision, {
+  payload: T3ObjectRestoreRevisionInput,
+  success: T3ObjectMutationResult,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+});
+
+const WsObjectsSubscribeRpc = Rpc.make(WS_METHODS.objectsSubscribe, {
+  payload: T3ObjectSubscribeInput,
+  success: T3ObjectStreamEvent,
+  error: Schema.Union([T3ObjectError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2461,6 +2569,18 @@ export const WsRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsObjectsListRpc,
+  WsObjectsReadRpc,
+  WsObjectsCreateRpc,
+  WsObjectsRenameRpc,
+  WsObjectsSetArchivedRpc,
+  WsObjectsDeleteRpc,
+  WsObjectsMutateDesignRpc,
+  WsObjectsReplaceDesignRpc,
+  WsObjectsListRevisionsRpc,
+  WsObjectsReadRevisionRpc,
+  WsObjectsRestoreRevisionRpc,
+  WsObjectsSubscribeRpc,
   WsServerReportClientActivityRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,

@@ -11,6 +11,7 @@ import type {
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { useNavigate } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import { LinkedThreadPane } from "./LinkedThreadPane";
 import SideThreadPane from "./SideThreadPane";
@@ -37,6 +38,11 @@ const DevicePanel = lazy(() =>
   import("../device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
 const FilePreviewPanel = lazy(() => import("../files/FilePreviewPanel"));
+const DesignObjectWorkspace = lazy(() =>
+  import("../objects/DesignObjectWorkspace").then((module) => ({
+    default: module.DesignObjectWorkspace,
+  })),
+);
 
 type RightPanelTerminalProps = Omit<
   PersistentThreadTerminalPanelProps,
@@ -89,8 +95,30 @@ export function RightPanelSurfaceContent(props: {
 }) {
   const { surface, threadRef, visible, onCloseSurface } = props;
   const gt = useGT();
+  const navigate = useNavigate();
   if (surface === null) return null;
   switch (surface.kind) {
+    case "object": {
+      const targetEnvId = surface.environmentId ?? props.environmentId;
+      return (
+        <Suspense fallback={null}>
+          <DesignObjectWorkspace
+            key={surface.id}
+            environmentId={targetEnvId}
+            objectId={surface.objectId}
+            compact
+            threadRef={threadRef}
+            onSendAnnotation={props.onSendAnnotation}
+            onOpenFullPage={() => {
+              void navigate({
+                to: "/objects",
+                search: { objectId: surface.objectId, objectEnvId: targetEnvId },
+              });
+            }}
+          />
+        </Suspense>
+      );
+    }
     case "preview":
       return (
         <Suspense fallback={null}>

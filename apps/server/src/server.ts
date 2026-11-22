@@ -168,6 +168,7 @@ import * as ReplayMarkers from "./auth/replayMarkers.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as CodexManagedTokenBroker from "./provider/CodexManagedTokenBroker.ts";
 import * as WebhookRoute from "./scheduledTasks/webhookRoute.ts";
+import * as T3Objects from "./objects/T3ObjectService.ts";
 import * as RelayDeliveryProof from "./scheduledTasks/RelayDeliveryProof.ts";
 import * as HeldHooksWaker from "./relay/HeldHooksWaker.ts";
 import * as McpOAuth from "./auth/McpOAuth.ts";
@@ -840,6 +841,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 );
 
 const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
+  Layer.provideMerge(T3Objects.layer),
   Layer.provideMerge(layerUsage),
   Layer.provideMerge(layerBackground),
   // The same layer the event sink uses; memoized, subscriptions and batch ranking share it.

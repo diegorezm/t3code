@@ -2,6 +2,7 @@ import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { GlobalVoiceInputIndicator } from "../components/chat/GlobalVoiceInputIndicator";
+import { AgentOpenedObjectsObserver } from "../components/objects/AgentOpenedObjectsObserver";
 import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { SidebarInset } from "../components/ui/sidebar";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -14,6 +15,9 @@ function ChatRouteLayout() {
   const { shownTarget, modalOpen } = useShownThreadRouteTarget();
   return (
     <>
+      {shownTarget?.kind === "server" ? (
+        <AgentOpenedObjectsObserver environmentId={shownTarget.threadRef.environmentId} />
+      ) : null}
       {shownTarget?.kind === "server" && !modalOpen ? (
         <ThreadLinkPrompt threadRef={shownTarget.threadRef} />
       ) : null}

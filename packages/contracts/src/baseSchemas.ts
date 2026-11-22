@@ -340,3 +340,7 @@ export const RawEventId = makeEntityId("RawEventId");
 export type RawEventId = typeof RawEventId.Type;
 export const PlanId = makeEntityId("PlanId");
 export type PlanId = typeof PlanId.Type;
+export const T3ObjectId = makeEntityId("T3ObjectId");
+export type T3ObjectId = typeof T3ObjectId.Type;
+export const DesignNodeId = makeEntityId("DesignNodeId");
+export type DesignNodeId = typeof DesignNodeId.Type;
