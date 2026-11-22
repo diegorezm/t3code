@@ -80,7 +80,7 @@ export function sanitizeDesignSvg(raw: string): string {
     .replace(/javascript:/gi, "");
 }
 
-export function formatDesignPadding(padding: DesignPadding | undefined): string | null {
+function formatDesignPadding(padding: DesignPadding | undefined): string | null {
   if (padding === undefined) return null;
   if (typeof padding === "number") {
     return `${padding}px`;
@@ -88,7 +88,7 @@ export function formatDesignPadding(padding: DesignPadding | undefined): string 
   return `${padding.top}px ${padding.right}px ${padding.bottom}px ${padding.left}px`;
 }
 
-export function formatDesignShadow(shadow: DesignShadow | undefined): string | null {
+function formatDesignShadow(shadow: DesignShadow | undefined): string | null {
   if (shadow === undefined) return null;
   const spread = shadow.spread ?? 0;
   return `${shadow.x}px ${shadow.y}px ${shadow.blur}px ${spread}px ${sanitizeCssValue(shadow.color)}`;

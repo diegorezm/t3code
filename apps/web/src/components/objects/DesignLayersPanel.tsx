@@ -26,7 +26,7 @@ import {
   UnlockIcon,
   UserIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
@@ -52,14 +52,80 @@ function NodeTypeIcon({ type }: { readonly type: DesignNode["type"] }) {
   }
 }
 
+function LayerRenameInput({
+  initialName,
+  ariaLabel,
+  onCommit,
+  onCancel,
+}: {
+  readonly initialName: string;
+  readonly ariaLabel: string;
+  readonly onCommit: (nextName: string) => void;
+  readonly onCancel: () => void;
+}) {
+  const [nameDraft, setNameDraft] = useState(initialName);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const committedRef = useRef(false);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses and selects inline layer rename input when mounted
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
+
+  const finish = () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    const trimmed = nameDraft.trim();
+    if (trimmed.length > 0 && trimmed !== initialName) {
+      onCommit(trimmed);
+    } else {
+      onCancel();
+    }
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      aria-label={ariaLabel}
+      value={nameDraft}
+      className="h-5 min-w-0 flex-1 rounded border border-primary bg-background px-1 text-xs text-foreground outline-none select-text"
+      onChange={(event) => setNameDraft(event.target.value)}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onBlur={finish}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finish();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          committedRef.current = true;
+          onCancel();
+        }
+      }}
+    />
+  );
+}
+
 function LayerRow({
   doc,
   nodeId,
   depth,
   selectedId,
+  renamingId,
   collapsedIds,
   onToggleCollapse,
   onSelect,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onNodeContextMenu,
   onToggleVisible,
   onToggleLocked,
   onDelete,
@@ -68,9 +134,16 @@ function LayerRow({
   readonly nodeId: DesignNodeId;
   readonly depth: number;
   readonly selectedId: DesignNodeId | null;
+  readonly renamingId: DesignNodeId | null;
   readonly collapsedIds: ReadonlySet<string>;
   readonly onToggleCollapse: (id: DesignNodeId) => void;
   readonly onSelect: (id: DesignNodeId) => void;
+  readonly onStartRename: (id: DesignNodeId) => void;
+  readonly onCommitRename: (node: DesignNode, nextName: string) => void;
+  readonly onCancelRename: () => void;
+  readonly onNodeContextMenu?:
+    | ((event: ReactMouseEvent<HTMLDivElement>, node: DesignNode) => void)
+    | undefined;
   readonly onToggleVisible: (node: DesignNode) => void;
   readonly onToggleLocked: (node: DesignNode) => void;
   readonly onDelete: (id: DesignNodeId) => void;
@@ -79,6 +152,7 @@ function LayerRow({
   const node = doc.nodes[nodeId];
   if (node === undefined) return null;
 
+  const isRenaming = renamingId === node.id;
   const isSelected = selectedId === node.id;
   const isFrame = node.type === "frame";
   const hasChildren = isFrame && node.childIds.length > 0;
@@ -96,6 +170,15 @@ function LayerRow({
         )}
         style={{ paddingLeft: `${depth * 12 + 6}px` }}
         onClick={() => onSelect(node.id)}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          onStartRename(node.id);
+        }}
+        onContextMenu={(event) => {
+          if (onNodeContextMenu === undefined) return;
+          event.preventDefault();
+          onNodeContextMenu(event, node);
+        }}
       >
         <button
           type="button"
@@ -117,43 +200,54 @@ function LayerRow({
         </button>
 
         <NodeTypeIcon type={node.type} />
-        <span className="min-w-0 flex-1 truncate">{node.name}</span>
+        {isRenaming ? (
+          <LayerRenameInput
+            initialName={node.name}
+            ariaLabel={gt("Rename layer")}
+            onCommit={(nextName) => onCommitRename(node, nextName)}
+            onCancel={onCancelRename}
+          />
+        ) : (
+          <span className="min-w-0 flex-1 truncate">{node.name}</span>
+        )}
 
-        <div className="hidden items-center gap-0.5 text-muted-foreground group-hover:flex">
-          <button
-            type="button"
-            className="flex size-5 items-center justify-center rounded hover:bg-background/70 hover:text-foreground"
-            aria-label={isHidden ? gt("Show layer") : gt("Hide layer")}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleVisible(node);
-            }}
-          >
-            {isHidden ? <EyeOffIcon className="size-3" /> : <EyeIcon className="size-3" />}
-          </button>
-          <button
-            type="button"
-            className="flex size-5 items-center justify-center rounded hover:bg-background/70 hover:text-foreground"
-            aria-label={isLocked ? gt("Unlock layer") : gt("Lock layer")}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleLocked(node);
-            }}
-          >
-            {isLocked ? <LockIcon className="size-3" /> : <UnlockIcon className="size-3" />}
-          </button>
-          <button
-            type="button"
-            className="flex size-5 items-center justify-center rounded hover:bg-background/70 hover:text-destructive"
-            aria-label={gt("Delete layer")}
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete(node.id);
-            }}
-          >
-            <Trash2Icon className="size-3" />
-          </button>
-        </div>
+        {!isRenaming ? (
+          <div className="hidden items-center gap-0.5 text-muted-foreground group-hover:flex">
+            <button
+              type="button"
+              className="flex size-5 items-center justify-center rounded hover:bg-background/70 hover:text-foreground"
+              aria-label={isHidden ? gt("Show layer") : gt("Hide layer")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleVisible(node);
+              }}
+            >
+              {isHidden ? <EyeOffIcon className="size-3" /> : <EyeIcon className="size-3" />}
+            </button>
+            <button
+              type="button"
+              className="flex size-5 items-center justify-center rounded hover:bg-background/70 hover:text-foreground"
+              aria-label={isLocked ? gt("Unlock layer") : gt("Lock layer")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleLocked(node);
+              }}
+            >
+              {isLocked ? <LockIcon className="size-3" /> : <UnlockIcon className="size-3" />}
+            </button>
+            <button
+              type="button"
+              className="flex size-5 items-center justify-center rounded hover:bg-background/70 hover:text-destructive"
+              aria-label={gt("Delete layer")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(node.id);
+              }}
+            >
+              <Trash2Icon className="size-3" />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {hasChildren && !isCollapsed
@@ -164,9 +258,14 @@ function LayerRow({
               nodeId={childId}
               depth={depth + 1}
               selectedId={selectedId}
+              renamingId={renamingId}
               collapsedIds={collapsedIds}
               onToggleCollapse={onToggleCollapse}
               onSelect={onSelect}
+              onStartRename={onStartRename}
+              onCommitRename={onCommitRename}
+              onCancelRename={onCancelRename}
+              onNodeContextMenu={onNodeContextMenu}
               onToggleVisible={onToggleVisible}
               onToggleLocked={onToggleLocked}
               onDelete={onDelete}
@@ -181,12 +280,17 @@ export function DesignLayersPanel({
   doc,
   width,
   selectedId,
+  renamingId,
   currentRevision,
   revisions,
   revisionsLoading,
   activeTab,
   onTabChange,
   onSelect,
+  onStartRename,
+  onRename,
+  onCancelRename,
+  onNodeContextMenu,
   onToggleVisible,
   onToggleLocked,
   onDelete,
@@ -195,12 +299,19 @@ export function DesignLayersPanel({
   readonly doc: DesignDocument;
   readonly width: number;
   readonly selectedId: DesignNodeId | null;
+  readonly renamingId: DesignNodeId | null;
   readonly currentRevision: number;
   readonly revisions: ReadonlyArray<T3ObjectRevisionSummary>;
   readonly revisionsLoading: boolean;
   readonly activeTab: "layers" | "history";
   readonly onTabChange: (tab: "layers" | "history") => void;
   readonly onSelect: (id: DesignNodeId | null) => void;
+  readonly onStartRename: (id: DesignNodeId) => void;
+  readonly onRename: (node: DesignNode, nextName: string) => void;
+  readonly onCancelRename: () => void;
+  readonly onNodeContextMenu?:
+    | ((event: ReactMouseEvent<HTMLDivElement>, node: DesignNode) => void)
+    | undefined;
   readonly onToggleVisible: (node: DesignNode) => void;
   readonly onToggleLocked: (node: DesignNode) => void;
   readonly onDelete: (id: DesignNodeId) => void;
@@ -262,9 +373,17 @@ export function DesignLayersPanel({
                   nodeId={rootId}
                   depth={0}
                   selectedId={selectedId}
+                  renamingId={renamingId}
                   collapsedIds={collapsedIds}
                   onToggleCollapse={toggleCollapse}
                   onSelect={(id) => onSelect(id)}
+                  onStartRename={onStartRename}
+                  onCommitRename={(node, nextName) => {
+                    onRename(node, nextName);
+                    onCancelRename();
+                  }}
+                  onCancelRename={onCancelRename}
+                  onNodeContextMenu={onNodeContextMenu}
                   onToggleVisible={onToggleVisible}
                   onToggleLocked={onToggleLocked}
                   onDelete={onDelete}

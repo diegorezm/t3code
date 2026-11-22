@@ -123,7 +123,7 @@ export function DesignInspectorPanel({
   readonly width: number;
   readonly selectedId: DesignNodeId | null;
   readonly onPatchNode: (id: DesignNodeId, patch: DesignNodePatch, summary: string) => void;
-  readonly onSetBackground: (background: string) => void;
+  readonly onSetBackground: (background: string | null) => void;
   readonly onDetachFromParent: (node: DesignNode) => void;
 }) {
   const gt = useGT();
@@ -141,12 +141,10 @@ export function DesignInspectorPanel({
         <div className="flex flex-col gap-3 p-3">
           <ColorField
             label={gt("Background")}
-            value={doc.background ?? "#0f1117"}
-            placeholder="#0f1117"
-            allowClear={false}
-            onCommit={(next) => {
-              if (next !== null) onSetBackground(next);
-            }}
+            value={doc.background}
+            placeholder={gt("Theme")}
+            allowClear
+            onCommit={onSetBackground}
           />
           <p className="text-2xs leading-relaxed text-muted-foreground">
             <T>Select a layer to edit its properties.</T>

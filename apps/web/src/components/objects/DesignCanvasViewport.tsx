@@ -1,15 +1,30 @@
 import type {
   DesignDocument,
-  DesignNode,
+  DesignMutationOp,
   DesignNodeId,
   DesignNodeInput,
-  DesignNodePatch,
 } from "@t3tools/contracts";
 import {
-  formatDesignPadding,
-  formatDesignShadow,
-  sanitizeDesignSvg,
-} from "@t3tools/shared/designRender";
+  EditorEvent,
+  EditorMoveEvent,
+  EditorRotateEvent,
+  EditorScaleEvent,
+  InnerEditorEvent,
+} from "@leafer-in/editor";
+import "@leafer-in/flow";
+import "@leafer-in/text-editor";
+import "@leafer-in/view";
+import "@leafer-in/viewport";
+import {
+  App,
+  DragEvent,
+  Group,
+  MoveEvent,
+  PointerEvent as LeaferPointerEvent,
+  ZoomEvent,
+  type IUI,
+} from "leafer-ui";
+import { useGT } from "gt-react";
 import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
@@ -24,46 +39,56 @@ import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 import {
   clampBubblePosition,
-  clampZoom,
-  computeResizedBounds,
+  isEditableTarget,
   makeNodeInputForTool,
   type DesignDrawTool,
   type DesignTool,
   type NodeBounds,
   type Point2D,
-  type ResizeHandle,
   type ViewportSize,
   type ViewportTransform,
 } from "./designEditorTypes";
+import {
+  designDocumentToLeaferTree,
+  extractTransformTargets,
+  FRAME_LABEL_OFFSET_Y,
+  parseFrameLabelNodeId,
+  readLeaferNodePatch,
+} from "./leaferSceneAdapter";
 
-interface MoveInteraction {
-  readonly kind: "move";
-  readonly pointerId: number;
-  readonly nodeId: DesignNodeId;
-  readonly inAutoLayoutParent: boolean;
-  readonly startClientX: number;
-  readonly startClientY: number;
-  readonly startBounds: NodeBounds;
-  readonly currentBounds: NodeBounds;
-  readonly dragOffsetX: number;
-  readonly dragOffsetY: number;
-  readonly startRectLeft: number;
-  readonly startRectTop: number;
+export interface DesignCanvasHandle {
+  readonly fitView: () => void;
+  readonly zoomIn: () => void;
+  readonly zoomOut: () => void;
+  readonly getNodeAnchorWorld: (id: DesignNodeId) => Point2D | null;
+  readonly startRename: (id: DesignNodeId) => void;
 }
 
-interface ResizeInteraction {
-  readonly kind: "resize";
-  readonly pointerId: number;
+export type DesignCanvasContextMenuRequest =
+  | {
+      readonly kind: "node";
+      readonly nodeId: DesignNodeId;
+      readonly clientX: number;
+      readonly clientY: number;
+      readonly worldX: number;
+      readonly worldY: number;
+    }
+  | {
+      readonly kind: "canvas";
+      readonly clientX: number;
+      readonly clientY: number;
+      readonly worldX: number;
+      readonly worldY: number;
+    };
+
+interface InlineRenameState {
   readonly nodeId: DesignNodeId;
-  readonly handle: ResizeHandle;
-  readonly startClientX: number;
-  readonly startClientY: number;
-  readonly startBounds: NodeBounds;
-  readonly currentBounds: NodeBounds;
+  readonly draft: string;
+  readonly worldX: number;
+  readonly worldY: number;
 }
 
-interface DrawInteraction {
-  readonly kind: "draw";
+interface DrawDraft {
   readonly pointerId: number;
   readonly tool: DesignDrawTool;
   readonly parentId: DesignNodeId | null;
@@ -73,379 +98,65 @@ interface DrawInteraction {
   readonly currentWorldY: number;
 }
 
-interface PanInteraction {
-  readonly kind: "pan";
-  readonly pointerId: number;
-  readonly startClientX: number;
-  readonly startClientY: number;
-  readonly startViewportX: number;
-  readonly startViewportY: number;
-  readonly deselectOnClick: boolean;
-  readonly moved: boolean;
-}
-
-interface PickInteraction {
-  readonly kind: "pick";
-  readonly pointerId: number;
-  readonly startClientX: number;
-  readonly startClientY: number;
-  readonly startViewportX: number;
-  readonly startViewportY: number;
-  readonly candidateNodeId: DesignNodeId | null;
-  readonly panning: boolean;
-}
-
-type ActiveInteraction =
-  | MoveInteraction
-  | ResizeInteraction
-  | DrawInteraction
-  | PanInteraction
-  | PickInteraction;
-
-const PAN_DRAG_THRESHOLD_PX = 4;
 const BUBBLE_WIDTH_PX = 360;
 const BUBBLE_HEIGHT_PX = 52;
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 4;
 
-const RESIZE_HANDLES: ReadonlyArray<{
-  readonly handle: ResizeHandle;
-  readonly className: string;
-}> = [
-  { handle: "nw", className: "-top-1 -left-1 cursor-nwse-resize" },
-  { handle: "n", className: "-top-1 left-1/2 -translate-x-1/2 cursor-ns-resize" },
-  { handle: "ne", className: "-top-1 -right-1 cursor-nesw-resize" },
-  { handle: "e", className: "top-1/2 -right-1 -translate-y-1/2 cursor-ew-resize" },
-  { handle: "se", className: "-bottom-1 -right-1 cursor-nwse-resize" },
-  { handle: "s", className: "-bottom-1 left-1/2 -translate-x-1/2 cursor-ns-resize" },
-  { handle: "sw", className: "-bottom-1 -left-1 cursor-nesw-resize" },
-  { handle: "w", className: "top-1/2 -left-1 -translate-y-1/2 cursor-ew-resize" },
-];
+function isDrawTool(tool: DesignTool): tool is DesignDrawTool {
+  return tool !== "select" && tool !== "hand";
+}
 
-function flexAlign(value: string | undefined): CSSProperties["alignItems"] {
-  switch (value) {
-    case "center":
-      return "center";
-    case "end":
-      return "flex-end";
-    case "stretch":
-      return "stretch";
-    default:
-      return "flex-start";
+function readTreeViewport(app: App): ViewportTransform {
+  const scale = typeof app.tree.scaleX === "number" && app.tree.scaleX > 0 ? app.tree.scaleX : 1;
+  return {
+    x: app.tree.x ?? 0,
+    y: app.tree.y ?? 0,
+    zoom: Math.round(scale * 100) / 100,
+  };
+}
+
+function clearEditorHover(app: App): void {
+  // Leafer's `hoverTarget` setter clears `hoverStroker` on null, but its `.d.ts` omits `| null`.
+  (app.editor as { hoverTarget: IUI | null }).hoverTarget = null;
+}
+
+function syncFrameLabelAppearance(
+  labels: ReadonlyMap<string, IUI>,
+  selectedId: DesignNodeId | null,
+  renamingNodeId: DesignNodeId | null,
+): void {
+  for (const [frameId, label] of labels) {
+    label.set({
+      fill: frameId === selectedId ? "#60a5fa" : "#71717a",
+      visible: frameId !== renamingNodeId,
+    });
   }
 }
 
-function flexJustify(value: string | undefined): CSSProperties["justifyContent"] {
-  switch (value) {
-    case "center":
-      return "center";
-    case "end":
-      return "flex-end";
-    case "space-between":
-      return "space-between";
-    case "space-around":
-      return "space-around";
-    default:
-      return "flex-start";
-  }
+function findFrameLabelNodeId(target: unknown, doc: DesignDocument): DesignNodeId | null {
+  const cursor = target as { name?: unknown } | null | undefined;
+  const labelNodeId = parseFrameLabelNodeId(cursor?.name);
+  return labelNodeId !== null && labelNodeId in doc.nodes ? labelNodeId : null;
 }
 
-function CanvasNodeView({
-  doc,
-  nodeId,
-  inAutoLayoutParent,
-  selectedId,
-  editingTextId,
-  draftBounds,
-  autoLayoutDragOffset,
-  tool,
-  pickActive,
-  panMode,
-  onSelect,
-  onStartMove,
-  onStartResize,
-  onStartEditText,
-  onCommitText,
-}: {
-  readonly doc: DesignDocument;
-  readonly nodeId: DesignNodeId;
-  readonly inAutoLayoutParent: boolean;
-  readonly selectedId: DesignNodeId | null;
-  readonly editingTextId: DesignNodeId | null;
-  readonly draftBounds: { readonly id: DesignNodeId; readonly bounds: NodeBounds } | null;
-  readonly autoLayoutDragOffset: {
-    readonly id: DesignNodeId;
-    readonly dx: number;
-    readonly dy: number;
-  } | null;
-  readonly tool: DesignTool;
-  readonly pickActive: boolean;
-  readonly panMode: boolean;
-  readonly onSelect: (id: DesignNodeId) => void;
-  readonly onStartMove: (
-    event: ReactPointerEvent,
-    node: DesignNode,
-    inAutoLayoutParent: boolean,
-  ) => void;
-  readonly onStartResize: (
-    event: ReactPointerEvent,
-    node: DesignNode,
-    handle: ResizeHandle,
-  ) => void;
-  readonly onStartEditText: (id: DesignNodeId) => void;
-  readonly onCommitText: (node: DesignNode, text: string) => void;
-}) {
-  const node = doc.nodes[nodeId];
-  if (node === undefined || node.visible === false) return null;
-
-  const isSelected = selectedId === node.id;
-  const isEditingText = editingTextId === node.id && node.type === "text";
-  const effectiveBounds =
-    draftBounds !== null && draftBounds.id === node.id
-      ? draftBounds.bounds
-      : { x: node.x, y: node.y, width: node.width, height: node.height };
-  const isAutoLayoutDragging = autoLayoutDragOffset !== null && autoLayoutDragOffset.id === node.id;
-
-  const transforms: Array<string> = [];
-  if (isAutoLayoutDragging) {
-    transforms.push(`translate(${autoLayoutDragOffset.dx}px, ${autoLayoutDragOffset.dy}px)`);
-  }
-  if (node.rotation) {
-    transforms.push(`rotate(${node.rotation}deg)`);
-  }
-
-  const style: CSSProperties = {
-    boxSizing: "border-box",
-    opacity: isAutoLayoutDragging ? Math.min(node.opacity ?? 1, 0.85) : (node.opacity ?? 1),
-    transform: transforms.length > 0 ? transforms.join(" ") : undefined,
-    zIndex: isAutoLayoutDragging ? 40 : undefined,
-    borderRadius:
-      node.type === "ellipse"
-        ? 9999
-        : node.radius !== undefined && node.radius > 0
-          ? node.radius
-          : undefined,
-    boxShadow: formatDesignShadow(node.shadow) ?? undefined,
-  };
-
-  if (inAutoLayoutParent) {
-    style.position = "relative";
-    style.flexShrink = 0;
-    if (node.widthMode === "fill") {
-      style.width = "100%";
-      style.flex = "1 1 auto";
-      style.minWidth = 0;
-    } else if (node.widthMode === "hug") {
-      style.width = "fit-content";
-    } else {
-      style.width = effectiveBounds.width;
+function findDocumentNodeId(target: unknown, doc: DesignDocument): DesignNodeId | null {
+  let cursor = target as { id?: unknown; name?: unknown; parent?: unknown } | null | undefined;
+  while (cursor !== null && cursor !== undefined) {
+    if (typeof cursor.id === "string" && cursor.id in doc.nodes) {
+      return cursor.id as DesignNodeId;
     }
-    if (node.heightMode === "fill") {
-      style.height = "100%";
-      style.alignSelf = "stretch";
-    } else if (node.heightMode === "hug") {
-      style.height = "fit-content";
-    } else {
-      style.height = effectiveBounds.height;
+    const labelNodeId = parseFrameLabelNodeId(cursor.name);
+    if (labelNodeId !== null && labelNodeId in doc.nodes) {
+      return labelNodeId;
     }
-  } else {
-    style.position = "absolute";
-    style.left = effectiveBounds.x;
-    style.top = effectiveBounds.y;
-    style.width = effectiveBounds.width;
-    style.height = effectiveBounds.height;
+    cursor = cursor.parent as { id?: unknown; name?: unknown; parent?: unknown } | null | undefined;
   }
-
-  if (node.fill !== undefined && node.type !== "line") {
-    if (node.fill.includes("gradient(")) {
-      style.background = node.fill;
-    } else {
-      style.backgroundColor = node.fill;
-    }
-  }
-  if (node.stroke !== undefined && node.type !== "line") {
-    style.border = `${node.strokeWidth ?? 1}px solid ${node.stroke}`;
-  }
-
-  if (node.type === "frame") {
-    if (node.clip !== false) {
-      style.overflow = "hidden";
-    }
-    if (node.layout !== undefined) {
-      style.display = "flex";
-      style.flexDirection = node.layout.direction === "horizontal" ? "row" : "column";
-      style.alignItems = flexAlign(node.layout.alignItems);
-      style.justifyContent = flexJustify(node.layout.justifyContent);
-      style.gap = node.layout.gap;
-      style.padding = formatDesignPadding(node.layout.padding) ?? undefined;
-      style.flexWrap = node.layout.wrap ? "wrap" : undefined;
-    }
-  } else if (node.type === "text") {
-    style.color = node.color ?? "#f8fafc";
-    style.fontSize = node.fontSize ?? 16;
-    style.fontWeight = node.fontWeight ?? 400;
-    style.lineHeight = node.lineHeight ?? 1.4;
-    style.textAlign = node.textAlign ?? "left";
-    style.fontFamily = node.fontFamily;
-    style.letterSpacing = node.letterSpacing;
-    style.whiteSpace = "pre-wrap";
-    style.wordBreak = "break-word";
-  } else if (node.type === "svg") {
-    style.display = "flex";
-    style.alignItems = "center";
-    style.justifyContent = "center";
-  } else if (node.type === "image") {
-    style.overflow = "hidden";
-  }
-
-  const handlePointerDown = (event: ReactPointerEvent) => {
-    if (panMode || pickActive || tool !== "select" || event.button !== 0 || isEditingText) return;
-    event.stopPropagation();
-    onSelect(node.id);
-    if (node.locked !== true) {
-      onStartMove(event, node, inAutoLayoutParent);
-    }
-  };
-
-  const handleDoubleClick = (event: ReactMouseEvent) => {
-    if (panMode || pickActive || node.type !== "text" || node.locked === true) return;
-    event.stopPropagation();
-    onStartEditText(node.id);
-  };
-
-  const canHoverOutline = !isSelected && !panMode && (pickActive || tool === "select");
-
-  return (
-    <div
-      data-design-node-id={node.id}
-      style={style}
-      className={cn(
-        "select-none",
-        !panMode && !pickActive && tool === "select" && !node.locked && "cursor-move",
-        isSelected && "ring-2 ring-inset ring-primary",
-        canHoverOutline && "hover:ring-1 hover:ring-inset hover:ring-primary/50",
-      )}
-      onPointerDown={handlePointerDown}
-      onDoubleClick={handleDoubleClick}
-    >
-      {node.type === "frame" && node.parentId === null ? (
-        <div className="pointer-events-none absolute -top-5 left-0 max-w-full truncate text-2xs font-medium text-muted-foreground">
-          {node.name}
-        </div>
-      ) : null}
-
-      {node.type === "frame"
-        ? node.childIds.map((childId) => (
-            <CanvasNodeView
-              key={childId}
-              doc={doc}
-              nodeId={childId}
-              inAutoLayoutParent={node.layout !== undefined}
-              selectedId={selectedId}
-              editingTextId={editingTextId}
-              draftBounds={draftBounds}
-              autoLayoutDragOffset={autoLayoutDragOffset}
-              tool={tool}
-              pickActive={pickActive}
-              panMode={panMode}
-              onSelect={onSelect}
-              onStartMove={onStartMove}
-              onStartResize={onStartResize}
-              onStartEditText={onStartEditText}
-              onCommitText={onCommitText}
-            />
-          ))
-        : null}
-
-      {node.type === "text" ? (
-        isEditingText ? (
-          <textarea
-            autoFocus
-            defaultValue={node.text}
-            className="size-full resize-none bg-transparent outline-none"
-            style={{
-              color: "inherit",
-              fontSize: "inherit",
-              fontWeight: "inherit",
-              lineHeight: "inherit",
-              textAlign: "inherit",
-              fontFamily: "inherit",
-            }}
-            onPointerDown={(event) => event.stopPropagation()}
-            onBlur={(event) => onCommitText(node, event.target.value)}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Escape" ||
-                (event.key === "Enter" && (event.metaKey || event.ctrlKey))
-              ) {
-                event.preventDefault();
-                onCommitText(node, event.currentTarget.value);
-              }
-            }}
-          />
-        ) : (
-          node.text
-        )
-      ) : null}
-
-      {node.type === "line" ? (
-        <svg
-          width="100%"
-          height="100%"
-          viewBox={`0 0 ${Math.max(1, effectiveBounds.width)} ${Math.max(1, effectiveBounds.height)}`}
-          preserveAspectRatio="none"
-        >
-          <line
-            x1="0"
-            y1={effectiveBounds.height / 2}
-            x2={effectiveBounds.width}
-            y2={effectiveBounds.height / 2}
-            stroke={node.stroke ?? node.fill ?? "#94a3b8"}
-            strokeWidth={node.strokeWidth ?? 2}
-            strokeDasharray={node.strokeDasharray}
-          />
-        </svg>
-      ) : null}
-
-      {node.type === "svg" ? (
-        <div
-          className="pointer-events-none flex size-full items-center justify-center"
-          dangerouslySetInnerHTML={{ __html: sanitizeDesignSvg(node.svg) }}
-        />
-      ) : null}
-
-      {node.type === "image" ? (
-        <img
-          src={node.src}
-          alt={node.name}
-          draggable={false}
-          className="pointer-events-none block size-full"
-          style={{ objectFit: node.objectFit ?? "cover" }}
-        />
-      ) : null}
-
-      {isSelected && !pickActive && !panMode && node.locked !== true && !isEditingText ? (
-        <>
-          {RESIZE_HANDLES.map(({ handle, className }) => (
-            <div
-              key={handle}
-              className={cn(
-                "absolute z-30 size-2.5 rounded-xs border border-primary bg-background shadow-xs",
-                className,
-              )}
-              onPointerDown={(event) => {
-                event.stopPropagation();
-                onStartResize(event, node, handle);
-              }}
-            />
-          ))}
-        </>
-      ) : null}
-    </div>
-  );
+  return null;
 }
 
 export function DesignCanvasViewport({
   doc,
-  viewport,
   tool,
   selectedId,
   pickActive,
@@ -453,17 +164,16 @@ export function DesignCanvasViewport({
   selectionOverlay,
   bottomOverlay,
   spacePressed,
+  handleRef,
   onViewportChange,
   onViewportSizeChange,
   onSelect,
   onPickNode,
   onAddNode,
-  onCommitPatch,
-  onReorderToIndex,
-  onDetachAndMove,
+  onCommitOps,
+  onContextMenu,
 }: {
   readonly doc: DesignDocument;
-  readonly viewport: ViewportTransform;
   readonly tool: DesignTool;
   readonly selectedId: DesignNodeId | null;
   readonly pickActive: boolean;
@@ -471,58 +181,72 @@ export function DesignCanvasViewport({
   readonly selectionOverlay: ReactNode;
   readonly bottomOverlay?: ReactNode;
   readonly spacePressed: boolean;
+  readonly handleRef: { current: DesignCanvasHandle | null };
   readonly onViewportChange: (next: ViewportTransform) => void;
   readonly onViewportSizeChange: (size: ViewportSize) => void;
   readonly onSelect: (id: DesignNodeId | null) => void;
   readonly onPickNode: (id: DesignNodeId | null, anchorWorld: Point2D | null) => void;
   readonly onAddNode: (input: DesignNodeInput) => void;
-  readonly onCommitPatch: (id: DesignNodeId, patch: DesignNodePatch, summary: string) => void;
-  readonly onReorderToIndex: (node: DesignNode, index: number) => void;
-  readonly onDetachAndMove: (node: DesignNode, x: number, y: number) => void;
+  readonly onCommitOps: (ops: ReadonlyArray<DesignMutationOp>, summary: string) => void;
+  readonly onContextMenu?: (request: DesignCanvasContextMenuRequest) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const interactionRef = useRef<ActiveInteraction | null>(null);
-  const [interaction, setInteraction] = useState<ActiveInteraction | null>(null);
-  const [editingTextId, setEditingTextId] = useState<DesignNodeId | null>(null);
+  const gt = useGT();
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const canvasMountRef = useRef<HTMLDivElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const renameCommittedRef = useRef(false);
+  const appRef = useRef<App | null>(null);
+  const contentLayerRef = useRef<Group | null>(null);
+  const frameLabelsRef = useRef<Map<string, IUI>>(new Map());
+  const syncingSelectionRef = useRef(false);
+  const editingTextRef = useRef(false);
+  const dirtyIdsRef = useRef<Set<string>>(new Set());
+  const hasAutoFitRef = useRef(false);
+
+  const [viewport, setViewport] = useState<ViewportTransform>({ x: 64, y: 48, zoom: 1 });
   const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 800, height: 600 });
+  const [drawDraft, setDrawDraft] = useState<DrawDraft | null>(null);
+  const drawDraftRef = useRef<DrawDraft | null>(null);
+  const [inlineRename, setInlineRename] = useState<InlineRenameState | null>(null);
 
   const latestRef = useRef({
     doc,
-    viewport,
+    tool,
+    selectedId,
+    pickActive,
+    spacePressed,
+    inlineRename,
     onViewportChange,
     onViewportSizeChange,
     onSelect,
     onPickNode,
     onAddNode,
-    onCommitPatch,
-    onReorderToIndex,
-    onDetachAndMove,
+    onCommitOps,
+    onContextMenu,
   });
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps latest props synced for window pointer, wheel, and resize listeners without tearing them down mid-drag
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps latest callbacks and state synced for Leafer imperative event listeners without recreating the canvas
   useEffect(() => {
     latestRef.current = {
       doc,
-      viewport,
+      tool,
+      selectedId,
+      pickActive,
+      spacePressed,
+      inlineRename,
       onViewportChange,
       onViewportSizeChange,
       onSelect,
       onPickNode,
       onAddNode,
-      onCommitPatch,
-      onReorderToIndex,
-      onDetachAndMove,
+      onCommitOps,
+      onContextMenu,
     };
   });
 
-  const setActiveInteraction = (next: ActiveInteraction | null) => {
-    interactionRef.current = next;
-    setInteraction(next);
-  };
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks canvas container size for fit-to-canvas and clamping the floating annotation bubble
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observes viewport host dimensions for bubble clamping and compact responsive controls
   useEffect(() => {
-    const element = containerRef.current;
+    const element = hostRef.current;
     if (element === null) return;
     const applySize = (width: number, height: number) => {
       if (width > 0 && height > 0) {
@@ -541,46 +265,456 @@ export function DesignCanvasViewport({
     });
   }, []);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers a non-passive wheel listener so Ctrl/Cmd+Wheel zooms the canvas instead of the Electron/browser window
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mounts and destroys the Leafer App instance and binds editor, viewport, and text-editor events
   useEffect(() => {
-    const element = containerRef.current;
-    if (element === null) return;
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const { viewport: current, onViewportChange: updateViewport } = latestRef.current;
-      if (event.ctrlKey || event.metaKey) {
-        const rect = element.getBoundingClientRect();
-        const pointerX = event.clientX - rect.left;
-        const pointerY = event.clientY - rect.top;
-        const factor = event.deltaY < 0 ? 1.1 : 0.9;
-        const nextZoom = clampZoom(current.zoom * factor);
-        const ratio = nextZoom / current.zoom;
-        updateViewport({
-          zoom: nextZoom,
-          x: pointerX - (pointerX - current.x) * ratio,
-          y: pointerY - (pointerY - current.y) * ratio,
-        });
+    const mountEl = canvasMountRef.current;
+    if (mountEl === null) return;
+
+    const app = new App({
+      view: mountEl,
+      tree: {
+        type: "viewport",
+        move: {
+          holdSpaceKey: false,
+          holdMiddleKey: true,
+          drag: false,
+        },
+        zoom: { min: 0.15, max: 4 },
+        wheel: { preventDefault: true },
+      },
+      editor: {
+        keyEvent: false,
+        editSize: "size",
+        stroke: "#3b82f6",
+        strokeWidth: 1.5,
+        pointSize: 8,
+        hover: true,
+        boxSelect: true,
+        multipleSelect: true,
+        rotateable: true,
+        skewable: false,
+        openInner: "double",
+      },
+    });
+
+    const contentLayer = new Group({ name: "t3-design-content" });
+    app.tree.add(contentLayer);
+    app.tree.x = 64;
+    app.tree.y = 48;
+
+    appRef.current = app;
+    contentLayerRef.current = contentLayer;
+    hasAutoFitRef.current = false;
+
+    const emitViewport = () => {
+      const next = readTreeViewport(app);
+      setViewport(next);
+      latestRef.current.onViewportChange(next);
+    };
+    emitViewport();
+
+    let zoomAnim: {
+      targetZoom: number;
+      focal: Point2D;
+      rafId: number | null;
+      lastTime: number;
+    } | null = null;
+
+    const cancelZoomAnim = () => {
+      if (zoomAnim?.rafId !== null && zoomAnim?.rafId !== undefined) {
+        window.cancelAnimationFrame(zoomAnim.rafId);
+      }
+      zoomAnim = null;
+    };
+
+    const getCurrentZoom = () =>
+      typeof app.tree.scaleX === "number" && app.tree.scaleX > 0 ? app.tree.scaleX : 1;
+
+    const applyZoomAt = (focal: Point2D, targetScale: number) => {
+      const current = getCurrentZoom();
+      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, targetScale));
+      const factor = clamped / current;
+      if (Math.abs(factor - 1) < 0.0005) return;
+      clearEditorHover(app);
+      app.tree.scaleOfWorld(focal, factor, factor);
+      app.tree.updateLayout();
+      app.editor.updateEditBox();
+      emitViewport();
+    };
+
+    const smoothZoomTo = (targetScale: number, focal: Point2D, immediate: boolean) => {
+      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, targetScale));
+      if (immediate) {
+        cancelZoomAnim();
+        applyZoomAt(focal, clamped);
+        return;
+      }
+
+      const step = (now: number) => {
+        if (zoomAnim === null) return;
+        const dt = Math.min(0.05, Math.max(0.001, (now - zoomAnim.lastTime) / 1000));
+        zoomAnim.lastTime = now;
+        const current = getCurrentZoom();
+        const alpha = 1 - Math.exp(-dt * 20);
+        const nextLog =
+          Math.log(current) + (Math.log(zoomAnim.targetZoom) - Math.log(current)) * alpha;
+        if (Math.abs(Math.log(zoomAnim.targetZoom) - nextLog) < 0.002) {
+          const finalZoom = zoomAnim.targetZoom;
+          const finalFocal = zoomAnim.focal;
+          zoomAnim = null;
+          applyZoomAt(finalFocal, finalZoom);
+          return;
+        }
+        applyZoomAt(zoomAnim.focal, Math.exp(nextLog));
+        zoomAnim.rafId = window.requestAnimationFrame(step);
+      };
+
+      if (zoomAnim === null) {
+        zoomAnim = { targetZoom: clamped, focal, rafId: null, lastTime: performance.now() };
+        zoomAnim.rafId = window.requestAnimationFrame(step);
       } else {
-        updateViewport({
-          ...current,
-          x: current.x - event.deltaX,
-          y: current.y - event.deltaY,
-        });
+        zoomAnim.targetZoom = clamped;
+        zoomAnim.focal = focal;
       }
     };
-    element.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      element.removeEventListener("wheel", onWheel);
-    };
-  }, []);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks active pan, move, resize, draw, and pick drags on window so drags never stall when focus shifts or pointer leaves the canvas
+    const onCaptureWheel = (event: WheelEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      const rect = mountEl.getBoundingClientRect();
+      const focal: Point2D = {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      };
+      const rawDelta = event.deltaY || event.deltaX;
+      if (rawDelta === 0) return;
+
+      const isTrackpadPinch = Math.abs(rawDelta) < 15 || !Number.isInteger(rawDelta);
+      const clampedDelta = Math.max(-120, Math.min(120, rawDelta));
+      const baseZoom = zoomAnim !== null ? zoomAnim.targetZoom : getCurrentZoom();
+      const factor = Math.exp(-clampedDelta * (isTrackpadPinch ? 0.008 : 0.0018));
+      smoothZoomTo(baseZoom * factor, focal, isTrackpadPinch);
+    };
+    mountEl.addEventListener("wheel", onCaptureWheel, { capture: true, passive: false });
+
+    const flushDirtyTransforms = () => {
+      if (dirtyIdsRef.current.size === 0) return;
+      const ids = Array.from(dirtyIdsRef.current);
+      dirtyIdsRef.current.clear();
+
+      const activeDoc = latestRef.current.doc;
+      const ops: Array<DesignMutationOp> = [];
+      let lastNodeName = "layer";
+
+      for (const rawId of ids) {
+        const nodeId = rawId as DesignNodeId;
+        const original = activeDoc.nodes[nodeId];
+        if (original === undefined) continue;
+        const leaf = contentLayer.findId(nodeId) as IUI | undefined;
+        if (leaf === undefined) continue;
+        const parent = original.parentId === null ? undefined : activeDoc.nodes[original.parentId];
+        const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
+        const patch = readLeaferNodePatch(leaf, original, inAutoLayoutParent);
+        if (patch !== null) {
+          ops.push({ op: "update", id: nodeId, patch });
+          lastNodeName = original.name;
+        }
+      }
+
+      if (ops.length > 0) {
+        const summary =
+          ops.length === 1 ? `Updated ${lastNodeName}` : `Updated ${ops.length} layers`;
+        latestRef.current.onCommitOps(ops, summary);
+      }
+    };
+
+    const syncFrameLabelForLeaf = (leaf: IUI) => {
+      if (typeof leaf.id !== "string") return;
+      const label = frameLabelsRef.current.get(leaf.id);
+      if (label === undefined) return;
+      label.x = leaf.x ?? 0;
+      label.y = (leaf.y ?? 0) - FRAME_LABEL_OFFSET_Y;
+    };
+
+    const openInlineRename = (nodeId: DesignNodeId) => {
+      const node = latestRef.current.doc.nodes[nodeId];
+      if (node === undefined) return;
+      const vp = readTreeViewport(app);
+      let worldX = node.x;
+      let worldY = node.y - FRAME_LABEL_OFFSET_Y;
+      if (!(node.type === "frame" && node.parentId === null)) {
+        const leaf = contentLayer.findId(nodeId) as IUI | undefined;
+        if (leaf !== undefined) {
+          const bounds = leaf.worldBoxBounds;
+          worldX = (bounds.x - vp.x) / vp.zoom;
+          worldY = (bounds.y - vp.y) / vp.zoom - FRAME_LABEL_OFFSET_Y;
+        }
+      }
+      renameCommittedRef.current = false;
+      setInlineRename({ nodeId, draft: node.name, worldX, worldY });
+    };
+
+    const markDirty = (event: {
+      readonly target?: unknown;
+      readonly list?: ReadonlyArray<IUI>;
+    }) => {
+      const targets = extractTransformTargets(app.editor.list, event.target, event.list);
+      for (const item of targets) {
+        if (typeof item.id === "string" && item.id.length > 0) {
+          dirtyIdsRef.current.add(item.id);
+          syncFrameLabelForLeaf(item);
+        }
+      }
+    };
+
+    app.tree.on(MoveEvent.MOVE, () => {
+      cancelZoomAnim();
+      emitViewport();
+    });
+    app.tree.on(ZoomEvent.ZOOM, emitViewport);
+
+    app.editor.on(EditorEvent.SELECT, (event: EditorEvent) => {
+      if (syncingSelectionRef.current || latestRef.current.pickActive) return;
+      const first = event.list[0];
+      const nextId =
+        first !== undefined &&
+        typeof first.id === "string" &&
+        first.id in latestRef.current.doc.nodes
+          ? (first.id as DesignNodeId)
+          : null;
+      latestRef.current.onSelect(nextId);
+    });
+
+    app.editor.on(EditorMoveEvent.MOVE, markDirty);
+    app.editor.on(EditorScaleEvent.SCALE, markDirty);
+    app.editor.on(EditorRotateEvent.ROTATE, markDirty);
+    app.editor.on(DragEvent.END, flushDirtyTransforms);
+    app.on(LeaferPointerEvent.UP, flushDirtyTransforms);
+
+    app.editor.on(InnerEditorEvent.OPEN, () => {
+      editingTextRef.current = true;
+    });
+
+    app.editor.on(InnerEditorEvent.CLOSE, (event: InnerEditorEvent) => {
+      editingTextRef.current = false;
+      const target = event.editTarget as (IUI & { text?: unknown }) | undefined;
+      if (target === undefined || typeof target.id !== "string") return;
+      const nodeId = target.id as DesignNodeId;
+      const original = latestRef.current.doc.nodes[nodeId];
+      if (original?.type !== "text") return;
+      const nextText = typeof target.text === "string" ? target.text : String(target.text ?? "");
+      if (nextText !== original.text) {
+        latestRef.current.onCommitOps(
+          [{ op: "update", id: nodeId, patch: { text: nextText } }],
+          `Edited text in ${original.name}`,
+        );
+      }
+    });
+
+    app.tree.on(LeaferPointerEvent.DOWN, (event: LeaferPointerEvent) => {
+      if (
+        !event.left ||
+        latestRef.current.pickActive ||
+        latestRef.current.spacePressed ||
+        latestRef.current.tool !== "select"
+      ) {
+        return;
+      }
+      const labelNodeId = findFrameLabelNodeId(event.target, latestRef.current.doc);
+      if (labelNodeId === null) return;
+      const frameLeaf = contentLayer.findId(labelNodeId) as IUI | undefined;
+      if (frameLeaf !== undefined) {
+        syncingSelectionRef.current = true;
+        app.editor.target = frameLeaf;
+        syncingSelectionRef.current = false;
+      }
+      latestRef.current.onSelect(labelNodeId);
+    });
+
+    app.tree.on(LeaferPointerEvent.DOUBLE_TAP, (event: LeaferPointerEvent) => {
+      if (
+        latestRef.current.pickActive ||
+        latestRef.current.spacePressed ||
+        latestRef.current.tool !== "select"
+      ) {
+        return;
+      }
+      const labelNodeId = findFrameLabelNodeId(event.target, latestRef.current.doc);
+      if (labelNodeId !== null) {
+        openInlineRename(labelNodeId);
+      }
+    });
+
+    app.tree.on(LeaferPointerEvent.TAP, (event: LeaferPointerEvent) => {
+      if (!latestRef.current.pickActive || latestRef.current.spacePressed) return;
+      const nodeId = findDocumentNodeId(event.target, latestRef.current.doc);
+      if (nodeId === null) {
+        latestRef.current.onPickNode(null, null);
+        return;
+      }
+      const leaf = contentLayer.findId(nodeId) as IUI | undefined;
+      const vp = readTreeViewport(app);
+      if (leaf !== undefined) {
+        const bounds = leaf.worldBoxBounds;
+        latestRef.current.onPickNode(nodeId, {
+          x: (bounds.x + bounds.width / 2 - vp.x) / vp.zoom,
+          y: (bounds.y + bounds.height - vp.y) / vp.zoom,
+        });
+      } else {
+        latestRef.current.onPickNode(nodeId, null);
+      }
+    });
+
+    handleRef.current = {
+      fitView: () => {
+        cancelZoomAnim();
+        clearEditorHover(app);
+        if (contentLayer.children.length === 0) {
+          app.tree.x = 64;
+          app.tree.y = 48;
+          app.tree.scaleX = 1;
+          app.tree.scaleY = 1;
+        } else {
+          app.tree.zoom("fit", 48);
+        }
+        app.tree.updateLayout();
+        app.editor.updateEditBox();
+        emitViewport();
+      },
+      zoomIn: () => {
+        const rect = mountEl.getBoundingClientRect();
+        const center = { x: rect.width / 2, y: rect.height / 2 };
+        const base = zoomAnim !== null ? zoomAnim.targetZoom : getCurrentZoom();
+        smoothZoomTo(base * 1.25, center, false);
+      },
+      zoomOut: () => {
+        const rect = mountEl.getBoundingClientRect();
+        const center = { x: rect.width / 2, y: rect.height / 2 };
+        const base = zoomAnim !== null ? zoomAnim.targetZoom : getCurrentZoom();
+        smoothZoomTo(base / 1.25, center, false);
+      },
+      getNodeAnchorWorld: (id: DesignNodeId) => {
+        const leaf = contentLayer.findId(id) as IUI | undefined;
+        if (leaf === undefined) return null;
+        const bounds = leaf.worldBoxBounds;
+        const vp = readTreeViewport(app);
+        return {
+          x: (bounds.x + bounds.width / 2 - vp.x) / vp.zoom,
+          y: (bounds.y + bounds.height - vp.y) / vp.zoom,
+        };
+      },
+      startRename: openInlineRename,
+    };
+
+    return () => {
+      cancelZoomAnim();
+      mountEl.removeEventListener("wheel", onCaptureWheel, { capture: true });
+      handleRef.current = null;
+      appRef.current = null;
+      contentLayerRef.current = null;
+      frameLabelsRef.current.clear();
+      app.destroy();
+    };
+  }, [handleRef]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reconciles the Leafer scene graph whenever the DesignDocument changes
+  useEffect(() => {
+    const app = appRef.current;
+    const contentLayer = contentLayerRef.current;
+    if (app === null || contentLayer === null || editingTextRef.current) return;
+
+    syncingSelectionRef.current = true;
+    app.editor.target = [];
+    contentLayer.clear();
+    frameLabelsRef.current.clear();
+    const nodes = designDocumentToLeaferTree(doc);
+    if (nodes.length > 0) {
+      contentLayer.add(nodes as never);
+      for (const child of contentLayer.children) {
+        const labelNodeId = parseFrameLabelNodeId(child.name);
+        if (labelNodeId !== null) {
+          frameLabelsRef.current.set(labelNodeId, child as IUI);
+        }
+      }
+    }
+
+    if (!hasAutoFitRef.current && doc.rootIds.length > 0) {
+      hasAutoFitRef.current = true;
+      app.tree.zoom("fit", 48);
+      const next = readTreeViewport(app);
+      setViewport(next);
+      latestRef.current.onViewportChange(next);
+    }
+
+    const activeSelectedId = latestRef.current.selectedId;
+    const activeRenameId = latestRef.current.inlineRename?.nodeId ?? null;
+    syncFrameLabelAppearance(frameLabelsRef.current, activeSelectedId, activeRenameId);
+
+    if (activeSelectedId !== null && !latestRef.current.pickActive) {
+      const target = contentLayer.findId(activeSelectedId) as IUI | undefined;
+      if (target !== undefined) {
+        app.editor.target = target;
+      }
+    }
+    syncingSelectionRef.current = false;
+  }, [doc]);
+
+  const renamingNodeId = inlineRename?.nodeId ?? null;
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps Leafer Editor selection and frame label highlight synced with external selection or inline rename changes
+  useEffect(() => {
+    const app = appRef.current;
+    const contentLayer = contentLayerRef.current;
+    if (app === null || contentLayer === null || editingTextRef.current) return;
+
+    syncingSelectionRef.current = true;
+    if (selectedId === null || pickActive) {
+      app.editor.target = [];
+    } else {
+      const target = contentLayer.findId(selectedId) as IUI | undefined;
+      app.editor.target = target ?? [];
+    }
+    syncingSelectionRef.current = false;
+
+    syncFrameLabelAppearance(frameLabelsRef.current, selectedId, renamingNodeId);
+  }, [selectedId, pickActive, renamingNodeId]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses and selects inline rename input after mounting (including when triggered from a closing context menu)
+  useEffect(() => {
+    if (renamingNodeId === null) return;
+    const rafId = window.requestAnimationFrame(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [renamingNodeId]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- switches Leafer pan/edit/pick modes when tool, Space key, or Annotate mode changes
+  useEffect(() => {
+    const app = appRef.current;
+    if (app === null) return;
+
+    const panMode = spacePressed || (!pickActive && tool === "hand");
+    const drawMode = !pickActive && !spacePressed && isDrawTool(tool);
+
+    if (app.config.move !== undefined) {
+      app.config.move.drag = panMode;
+    }
+    const editorActive = !panMode && !pickActive && !drawMode;
+    app.editor.hittable = editorActive;
+    app.editor.visible = editorActive;
+  }, [tool, pickActive, spacePressed]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks drag-to-draw creation gesture on window for frame/rect/ellipse/text/line tools
   useEffect(() => {
     const toWorld = (clientX: number, clientY: number) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      const vp = latestRef.current.viewport;
-      if (!rect) return { x: 0, y: 0 };
+      const rect = hostRef.current?.getBoundingClientRect();
+      const app = appRef.current;
+      if (!rect || app === null) return { x: 0, y: 0 };
+      const vp = readTreeViewport(app);
       return {
         x: (clientX - rect.left - vp.x) / vp.zoom,
         y: (clientY - rect.top - vp.y) / vp.zoom,
@@ -588,249 +722,46 @@ export function DesignCanvasViewport({
     };
 
     const onPointerMove = (event: PointerEvent) => {
-      const current = interactionRef.current;
+      const current = drawDraftRef.current;
       if (current === null || current.pointerId !== event.pointerId) return;
-      const { doc: activeDoc, viewport: vp, onViewportChange: updateViewport } = latestRef.current;
-
-      if (current.kind === "pan") {
-        const dx = event.clientX - current.startClientX;
-        const dy = event.clientY - current.startClientY;
-        const moved = current.moved || Math.hypot(dx, dy) >= PAN_DRAG_THRESHOLD_PX;
-        if (moved && !current.moved) {
-          const next: PanInteraction = { ...current, moved: true };
-          interactionRef.current = next;
-          setInteraction(next);
-        }
-        if (moved || !current.deselectOnClick) {
-          updateViewport({
-            ...vp,
-            x: current.startViewportX + dx,
-            y: current.startViewportY + dy,
-          });
-        }
-        return;
-      }
-
-      if (current.kind === "pick") {
-        const dx = event.clientX - current.startClientX;
-        const dy = event.clientY - current.startClientY;
-        if (!current.panning) {
-          if (Math.hypot(dx, dy) < PAN_DRAG_THRESHOLD_PX) return;
-          const next: PickInteraction = { ...current, panning: true };
-          interactionRef.current = next;
-          setInteraction(next);
-        }
-        updateViewport({
-          ...vp,
-          x: current.startViewportX + dx,
-          y: current.startViewportY + dy,
-        });
-        return;
-      }
-
-      if (current.kind === "move") {
-        const dx = (event.clientX - current.startClientX) / vp.zoom;
-        const dy = (event.clientY - current.startClientY) / vp.zoom;
-        const next: MoveInteraction = {
-          ...current,
-          dragOffsetX: Math.round(dx),
-          dragOffsetY: Math.round(dy),
-          currentBounds: {
-            ...current.startBounds,
-            x: Math.round(current.startBounds.x + dx),
-            y: Math.round(current.startBounds.y + dy),
-          },
-        };
-        interactionRef.current = next;
-        setInteraction(next);
-        return;
-      }
-
-      if (current.kind === "resize") {
-        const dx = (event.clientX - current.startClientX) / vp.zoom;
-        const dy = (event.clientY - current.startClientY) / vp.zoom;
-        const next: ResizeInteraction = {
-          ...current,
-          currentBounds: computeResizedBounds(current.startBounds, current.handle, dx, dy),
-        };
-        interactionRef.current = next;
-        setInteraction(next);
-        return;
-      }
-
-      if (current.kind === "draw") {
-        const world = toWorld(event.clientX, event.clientY);
-        const parentFrame =
-          current.parentId !== null ? activeDoc.nodes[current.parentId] : undefined;
-        const next: DrawInteraction = {
-          ...current,
-          currentWorldX: parentFrame !== undefined ? world.x - parentFrame.x : world.x,
-          currentWorldY: parentFrame !== undefined ? world.y - parentFrame.y : world.y,
-        };
-        interactionRef.current = next;
-        setInteraction(next);
-      }
+      const world = toWorld(event.clientX, event.clientY);
+      const parentFrame =
+        current.parentId !== null ? latestRef.current.doc.nodes[current.parentId] : undefined;
+      const next: DrawDraft = {
+        ...current,
+        currentWorldX: parentFrame !== undefined ? world.x - parentFrame.x : world.x,
+        currentWorldY: parentFrame !== undefined ? world.y - parentFrame.y : world.y,
+      };
+      drawDraftRef.current = next;
+      setDrawDraft(next);
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      const finished = interactionRef.current;
+      const finished = drawDraftRef.current;
       if (finished === null || finished.pointerId !== event.pointerId) return;
-      interactionRef.current = null;
-      setInteraction(null);
+      drawDraftRef.current = null;
+      setDrawDraft(null);
 
-      const {
-        doc: activeDoc,
-        viewport: vp,
-        onSelect: selectNode,
-        onPickNode: pickNode,
-        onAddNode: addNode,
-        onCommitPatch: commitPatch,
-        onReorderToIndex: reorderToIndex,
-        onDetachAndMove: detachAndMove,
-      } = latestRef.current;
-
-      if (finished.kind === "pan") {
-        if (finished.deselectOnClick && !finished.moved) {
-          selectNode(null);
-        }
-        return;
-      }
-
-      if (finished.kind === "pick") {
-        if (finished.panning) return;
-        if (finished.candidateNodeId === null) {
-          pickNode(null, null);
-          return;
-        }
-        const rect = containerRef.current?.getBoundingClientRect();
-        if (rect === undefined) {
-          pickNode(finished.candidateNodeId, null);
-          return;
-        }
-        const nodeEl = containerRef.current?.querySelector<HTMLElement>(
-          `[data-design-node-id="${CSS.escape(finished.candidateNodeId)}"]`,
-        );
-        const nodeRect = nodeEl?.getBoundingClientRect();
-        const screenX =
-          nodeRect !== undefined
-            ? nodeRect.left + nodeRect.width / 2 - rect.left
-            : event.clientX - rect.left;
-        const screenY =
-          nodeRect !== undefined ? nodeRect.bottom - rect.top : event.clientY - rect.top;
-        pickNode(finished.candidateNodeId, {
-          x: (screenX - vp.x) / vp.zoom,
-          y: (screenY - vp.y) / vp.zoom,
-        });
-        return;
-      }
-
-      if (finished.kind === "move") {
-        const node = activeDoc.nodes[finished.nodeId];
-        if (node === undefined) return;
-        const movedDistance = Math.hypot(finished.dragOffsetX, finished.dragOffsetY);
-        if (movedDistance < 3) return;
-
-        if (!finished.inAutoLayoutParent) {
-          commitPatch(
-            finished.nodeId,
-            { x: finished.currentBounds.x, y: finished.currentBounds.y },
-            `Moved ${node.name}`,
-          );
-          return;
-        }
-
-        const parent = node.parentId === null ? undefined : activeDoc.nodes[node.parentId];
-        const container = containerRef.current;
-        if (parent === undefined || parent.type !== "frame" || container === null) return;
-
-        const parentEl = container.querySelector<HTMLElement>(
-          `[data-design-node-id="${CSS.escape(parent.id)}"]`,
-        );
-        const parentRect = parentEl?.getBoundingClientRect();
-        const outsideParent =
-          parentRect !== undefined &&
-          (event.clientX < parentRect.left - 16 ||
-            event.clientX > parentRect.right + 16 ||
-            event.clientY < parentRect.top - 16 ||
-            event.clientY > parentRect.bottom + 16);
-
-        if (outsideParent) {
-          const dropLeft = finished.startRectLeft + (event.clientX - finished.startClientX);
-          const dropTop = finished.startRectTop + (event.clientY - finished.startClientY);
-          const worldDrop = toWorld(dropLeft, dropTop);
-          detachAndMove(node, Math.round(worldDrop.x), Math.round(worldDrop.y));
-          return;
-        }
-
-        const isHorizontal = parent.layout?.direction === "horizontal";
-        const pointerPos = isHorizontal ? event.clientX : event.clientY;
-        const otherSiblings = parent.childIds.filter((id) => id !== node.id);
-        let targetIndex = otherSiblings.length;
-        for (const [index, siblingId] of otherSiblings.entries()) {
-          const siblingEl = container.querySelector<HTMLElement>(
-            `[data-design-node-id="${CSS.escape(siblingId)}"]`,
-          );
-          const siblingRect = siblingEl?.getBoundingClientRect();
-          if (siblingRect === undefined) continue;
-          const center = isHorizontal
-            ? siblingRect.left + siblingRect.width / 2
-            : siblingRect.top + siblingRect.height / 2;
-          if (pointerPos < center) {
-            targetIndex = index;
-            break;
-          }
-        }
-        const currentIndex = parent.childIds.indexOf(node.id);
-        if (targetIndex !== currentIndex) {
-          reorderToIndex(node, targetIndex);
-        }
-        return;
-      }
-
-      if (finished.kind === "resize") {
-        const changed =
-          finished.currentBounds.x !== finished.startBounds.x ||
-          finished.currentBounds.y !== finished.startBounds.y ||
-          finished.currentBounds.width !== finished.startBounds.width ||
-          finished.currentBounds.height !== finished.startBounds.height;
-        if (changed) {
-          const node = activeDoc.nodes[finished.nodeId];
-          commitPatch(
-            finished.nodeId,
-            {
-              x: finished.currentBounds.x,
-              y: finished.currentBounds.y,
-              width: finished.currentBounds.width,
-              height: finished.currentBounds.height,
-            },
-            `Resized ${node?.name ?? "layer"}`,
-          );
-        }
-        return;
-      }
-
-      if (finished.kind === "draw") {
-        const x = Math.min(finished.startWorldX, finished.currentWorldX);
-        const y = Math.min(finished.startWorldY, finished.currentWorldY);
-        const width = Math.abs(finished.currentWorldX - finished.startWorldX);
-        const height = Math.abs(finished.currentWorldY - finished.startWorldY);
-        const bounds: NodeBounds =
-          width < 8 && height < 8
-            ? {
-                x,
-                y,
-                width: finished.tool === "frame" ? 360 : finished.tool === "text" ? 200 : 140,
-                height: finished.tool === "frame" ? 240 : finished.tool === "line" ? 4 : 64,
-              }
-            : { x, y, width, height };
-        addNode(makeNodeInputForTool(finished.tool, bounds, finished.parentId));
-      }
+      const x = Math.min(finished.startWorldX, finished.currentWorldX);
+      const y = Math.min(finished.startWorldY, finished.currentWorldY);
+      const width = Math.abs(finished.currentWorldX - finished.startWorldX);
+      const height = Math.abs(finished.currentWorldY - finished.startWorldY);
+      const bounds: NodeBounds =
+        width < 8 && height < 8
+          ? {
+              x,
+              y,
+              width: finished.tool === "frame" ? 360 : finished.tool === "text" ? 200 : 140,
+              height: finished.tool === "frame" ? 240 : finished.tool === "line" ? 4 : 64,
+            }
+          : { x, y, width, height };
+      latestRef.current.onAddNode(makeNodeInputForTool(finished.tool, bounds, finished.parentId));
     };
 
     const onPointerCancel = (event: PointerEvent) => {
-      if (interactionRef.current?.pointerId === event.pointerId) {
-        interactionRef.current = null;
-        setInteraction(null);
+      if (drawDraftRef.current?.pointerId === event.pointerId) {
+        drawDraftRef.current = null;
+        setDrawDraft(null);
       }
     };
 
@@ -844,166 +775,140 @@ export function DesignCanvasViewport({
     };
   }, []);
 
-  const clientToWorld = (clientX: number, clientY: number) => {
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return { x: 0, y: 0 };
-    return {
-      x: (clientX - rect.left - viewport.x) / viewport.zoom,
-      y: (clientY - rect.top - viewport.y) / viewport.zoom,
-    };
-  };
-
-  const handleBackgroundPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    setEditingTextId(null);
-    if (event.button !== 0 && event.button !== 1) return;
-
-    const forcePan = event.button === 1 || spacePressed || (!pickActive && tool === "hand");
-    if (forcePan) {
-      event.preventDefault();
-      setActiveInteraction({
-        kind: "pan",
-        pointerId: event.pointerId,
-        startClientX: event.clientX,
-        startClientY: event.clientY,
-        startViewportX: viewport.x,
-        startViewportY: viewport.y,
-        deselectOnClick: false,
-        moved: true,
-      });
-      return;
-    }
-
-    if (pickActive) {
-      const targetNodeEl =
-        event.target instanceof HTMLElement
-          ? event.target.closest<HTMLElement>("[data-design-node-id]")
-          : null;
-      const rawId = targetNodeEl?.dataset.designNodeId;
-      const candidateNodeId =
-        rawId !== undefined && rawId in doc.nodes ? (rawId as DesignNodeId) : null;
-      setActiveInteraction({
-        kind: "pick",
-        pointerId: event.pointerId,
-        startClientX: event.clientX,
-        startClientY: event.clientY,
-        startViewportX: viewport.x,
-        startViewportY: viewport.y,
-        candidateNodeId,
-        panning: false,
-      });
-      return;
-    }
-
-    if (tool === "select") {
-      // Dragging on empty canvas background pans smoothly; a short click deselects.
-      setActiveInteraction({
-        kind: "pan",
-        pointerId: event.pointerId,
-        startClientX: event.clientX,
-        startClientY: event.clientY,
-        startViewportX: viewport.x,
-        startViewportY: viewport.y,
-        deselectOnClick: true,
-        moved: false,
-      });
-      return;
-    }
-
-    if (tool === "hand") return;
-    const drawTool: DesignDrawTool = tool;
-    const world = clientToWorld(event.clientX, event.clientY);
+  const handleDrawPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !isDrawTool(tool)) return;
+    event.preventDefault();
+    const rect = hostRef.current?.getBoundingClientRect();
+    const app = appRef.current;
+    if (!rect || app === null) return;
+    const vp = readTreeViewport(app);
+    const worldX = (event.clientX - rect.left - vp.x) / vp.zoom;
+    const worldY = (event.clientY - rect.top - vp.y) / vp.zoom;
     const selectedNode = selectedId === null ? undefined : doc.nodes[selectedId];
     const targetParentId =
-      drawTool !== "frame" && selectedNode?.type === "frame" ? selectedNode.id : null;
+      tool !== "frame" && selectedNode?.type === "frame" ? selectedNode.id : null;
     const parentFrame = targetParentId !== null ? doc.nodes[targetParentId] : undefined;
-    const localX = parentFrame !== undefined ? world.x - parentFrame.x : world.x;
-    const localY = parentFrame !== undefined ? world.y - parentFrame.y : world.y;
+    const localX = parentFrame !== undefined ? worldX - parentFrame.x : worldX;
+    const localY = parentFrame !== undefined ? worldY - parentFrame.y : worldY;
 
-    setActiveInteraction({
-      kind: "draw",
+    const next: DrawDraft = {
       pointerId: event.pointerId,
-      tool: drawTool,
+      tool,
       parentId: targetParentId,
       startWorldX: localX,
       startWorldY: localY,
       currentWorldX: localX,
       currentWorldY: localY,
+    };
+    drawDraftRef.current = next;
+    setDrawDraft(next);
+  };
+
+  const commitInlineRename = () => {
+    if (renameCommittedRef.current) return;
+    renameCommittedRef.current = true;
+    const active = inlineRename;
+    setInlineRename(null);
+    if (active === null) return;
+    const original = doc.nodes[active.nodeId];
+    const trimmed = active.draft.trim();
+    if (original !== undefined && trimmed.length > 0 && trimmed !== original.name) {
+      onCommitOps(
+        [{ op: "update", id: active.nodeId, patch: { name: trimmed } }],
+        `Renamed ${original.name} to ${trimmed}`,
+      );
+    }
+  };
+
+  const cancelInlineRename = () => {
+    renameCommittedRef.current = true;
+    setInlineRename(null);
+  };
+
+  const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (isEditableTarget(event.target)) return;
+    if (onContextMenu === undefined) return;
+    const rect = hostRef.current?.getBoundingClientRect();
+    const app = appRef.current;
+    const contentLayer = contentLayerRef.current;
+    if (!rect || app === null || contentLayer === null) return;
+
+    event.preventDefault();
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    const vp = readTreeViewport(app);
+    const worldX = (localX - vp.x) / vp.zoom;
+    const worldY = (localY - vp.y) / vp.zoom;
+
+    const picked = app.tree.pick({ x: localX, y: localY });
+    const nodeId = findDocumentNodeId(picked.target, doc);
+    if (nodeId !== null) {
+      if (selectedId !== nodeId && !pickActive) {
+        const leaf = contentLayer.findId(nodeId) as IUI | undefined;
+        if (leaf !== undefined) {
+          syncingSelectionRef.current = true;
+          app.editor.target = leaf;
+          syncingSelectionRef.current = false;
+        }
+        onSelect(nodeId);
+      }
+      onContextMenu({
+        kind: "node",
+        nodeId,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        worldX,
+        worldY,
+      });
+      return;
+    }
+
+    onContextMenu({
+      kind: "canvas",
+      clientX: event.clientX,
+      clientY: event.clientY,
+      worldX,
+      worldY,
     });
   };
 
-  const handleStartMove = (
-    event: ReactPointerEvent,
-    node: DesignNode,
-    inAutoLayoutParent: boolean,
-  ) => {
-    const nodeEl = containerRef.current?.querySelector<HTMLElement>(
-      `[data-design-node-id="${CSS.escape(node.id)}"]`,
-    );
-    const rect = nodeEl?.getBoundingClientRect();
-    const startBounds = { x: node.x, y: node.y, width: node.width, height: node.height };
-    setActiveInteraction({
-      kind: "move",
-      pointerId: event.pointerId,
-      nodeId: node.id,
-      inAutoLayoutParent,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startBounds,
-      currentBounds: startBounds,
-      dragOffsetX: 0,
-      dragOffsetY: 0,
-      startRectLeft: rect?.left ?? event.clientX,
-      startRectTop: rect?.top ?? event.clientY,
-    });
-  };
+  const panMode = spacePressed || (!pickActive && tool === "hand");
+  const drawMode = !pickActive && !spacePressed && isDrawTool(tool);
 
-  const handleStartResize = (event: ReactPointerEvent, node: DesignNode, handle: ResizeHandle) => {
-    const startBounds = { x: node.x, y: node.y, width: node.width, height: node.height };
-    setActiveInteraction({
-      kind: "resize",
-      pointerId: event.pointerId,
-      nodeId: node.id,
-      handle,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startBounds,
-      currentBounds: startBounds,
-    });
-  };
-
-  const draftBounds =
-    interaction !== null &&
-    ((interaction.kind === "move" && !interaction.inAutoLayoutParent) ||
-      interaction.kind === "resize")
-      ? { id: interaction.nodeId, bounds: interaction.currentBounds }
-      : null;
-
-  const autoLayoutDragOffset =
-    interaction !== null && interaction.kind === "move" && interaction.inAutoLayoutParent
-      ? { id: interaction.nodeId, dx: interaction.dragOffsetX, dy: interaction.dragOffsetY }
-      : null;
-
-  const drawPreviewStyle: CSSProperties | null =
-    interaction?.kind === "draw"
+  const inlineRenamePosition =
+    inlineRename !== null && inlineRename.nodeId in doc.nodes
       ? (() => {
-          const parentFrame =
-            interaction.parentId !== null ? doc.nodes[interaction.parentId] : undefined;
-          const offsetX = parentFrame?.x ?? 0;
-          const offsetY = parentFrame?.y ?? 0;
+          const rawLeft = inlineRename.worldX * viewport.zoom + viewport.x;
+          const rawTop = inlineRename.worldY * viewport.zoom + viewport.y - 3;
+          const maxLeft = Math.max(8, viewportSize.width - 188);
+          const maxTop = Math.max(8, viewportSize.height - 32);
           return {
-            position: "absolute",
-            left: Math.min(interaction.startWorldX, interaction.currentWorldX) + offsetX,
-            top: Math.min(interaction.startWorldY, interaction.currentWorldY) + offsetY,
-            width: Math.max(2, Math.abs(interaction.currentWorldX - interaction.startWorldX)),
-            height: Math.max(2, Math.abs(interaction.currentWorldY - interaction.startWorldY)),
+            left: Math.round(Math.min(maxLeft, Math.max(8, rawLeft))),
+            top: Math.round(Math.min(maxTop, Math.max(8, rawTop))),
           };
         })()
       : null;
 
-  const isPanning =
-    (interaction?.kind === "pan" && (interaction.moved || !interaction.deselectOnClick)) ||
-    (interaction?.kind === "pick" && interaction.panning);
-  const panMode = spacePressed || (!pickActive && tool === "hand");
+  const drawPreviewStyle: CSSProperties | null =
+    drawDraft !== null
+      ? (() => {
+          const parentFrame =
+            drawDraft.parentId !== null ? doc.nodes[drawDraft.parentId] : undefined;
+          const offsetX = parentFrame?.x ?? 0;
+          const offsetY = parentFrame?.y ?? 0;
+          const worldLeft = Math.min(drawDraft.startWorldX, drawDraft.currentWorldX) + offsetX;
+          const worldTop = Math.min(drawDraft.startWorldY, drawDraft.currentWorldY) + offsetY;
+          const worldW = Math.max(2, Math.abs(drawDraft.currentWorldX - drawDraft.startWorldX));
+          const worldH = Math.max(2, Math.abs(drawDraft.currentWorldY - drawDraft.startWorldY));
+          return {
+            position: "absolute",
+            left: worldLeft * viewport.zoom + viewport.x,
+            top: worldTop * viewport.zoom + viewport.y,
+            width: worldW * viewport.zoom,
+            height: worldH * viewport.zoom,
+          };
+        })()
+      : null;
 
   const bubblePosition =
     selectionOverlay !== null && selectionAnchorWorld !== null
@@ -1022,65 +927,65 @@ export function DesignCanvasViewport({
 
   return (
     <div
-      ref={containerRef}
+      ref={hostRef}
       data-design-canvas-viewport="true"
       className={cn(
-        "relative min-h-0 min-w-0 flex-1 touch-none overflow-hidden select-none",
-        isPanning
-          ? "cursor-grabbing"
-          : panMode
-            ? "cursor-grab"
-            : pickActive || tool !== "select"
-              ? "cursor-crosshair"
-              : "cursor-default",
+        "relative min-h-0 min-w-0 flex-1 touch-none overflow-hidden bg-background select-none",
+        panMode
+          ? "cursor-grab active:cursor-grabbing"
+          : pickActive
+            ? "cursor-crosshair"
+            : undefined,
       )}
-      style={{
-        backgroundColor: doc.background ?? "#0f1117",
-        backgroundImage: "radial-gradient(circle, rgba(148, 163, 184, 0.18) 1px, transparent 1px)",
-        backgroundSize: `${Math.max(12, 24 * viewport.zoom)}px ${Math.max(12, 24 * viewport.zoom)}px`,
-        backgroundPosition: `${viewport.x}px ${viewport.y}px`,
-      }}
-      onPointerDown={handleBackgroundPointerDown}
+      style={doc.background !== undefined ? { backgroundColor: doc.background } : undefined}
+      onContextMenu={handleContextMenu}
     >
-      <div
-        className="pointer-events-auto absolute top-0 left-0 origin-top-left"
-        style={{
-          transform: `translate3d(${viewport.x}px, ${viewport.y}px, 0) scale(${viewport.zoom})`,
-        }}
-      >
-        {doc.rootIds.map((rootId) => (
-          <CanvasNodeView
-            key={rootId}
-            doc={doc}
-            nodeId={rootId}
-            inAutoLayoutParent={false}
-            selectedId={selectedId}
-            editingTextId={editingTextId}
-            draftBounds={draftBounds}
-            autoLayoutDragOffset={autoLayoutDragOffset}
-            tool={tool}
-            pickActive={pickActive}
-            panMode={panMode}
-            onSelect={(id) => onSelect(id)}
-            onStartMove={handleStartMove}
-            onStartResize={handleStartResize}
-            onStartEditText={(id) => setEditingTextId(id)}
-            onCommitText={(node, text) => {
-              setEditingTextId(null);
-              if (node.type === "text" && text !== node.text) {
-                onCommitPatch(node.id, { text }, `Edited text in ${node.name}`);
-              }
-            }}
-          />
-        ))}
+      <div ref={canvasMountRef} className="absolute inset-0 size-full" />
 
-        {drawPreviewStyle !== null ? (
-          <div
-            style={drawPreviewStyle}
-            className="pointer-events-none rounded-xs border border-dashed border-primary bg-primary/15"
-          />
-        ) : null}
-      </div>
+      {drawMode ? (
+        <div
+          className="absolute inset-0 z-20 cursor-crosshair"
+          onPointerDown={handleDrawPointerDown}
+        />
+      ) : null}
+
+      {drawPreviewStyle !== null ? (
+        <div
+          style={drawPreviewStyle}
+          className="pointer-events-none z-25 rounded-xs border border-dashed border-primary bg-primary/15"
+        />
+      ) : null}
+
+      {inlineRename !== null && inlineRenamePosition !== null ? (
+        <input
+          ref={renameInputRef}
+          type="text"
+          aria-label={gt("Rename layer")}
+          value={inlineRename.draft}
+          className="pointer-events-auto absolute z-45 h-6 w-44 rounded-md border border-primary bg-background/95 px-1.5 text-xs font-medium text-foreground shadow-lg outline-none ring-2 ring-primary/25 select-text"
+          style={{
+            left: inlineRenamePosition.left,
+            top: inlineRenamePosition.top,
+          }}
+          onChange={(event) => {
+            const nextDraft = event.target.value;
+            setInlineRename((prev) => (prev !== null ? { ...prev, draft: nextDraft } : null));
+          }}
+          onBlur={commitInlineRename}
+          onPointerDown={(event) => event.stopPropagation()}
+          onWheel={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitInlineRename();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelInlineRename();
+            }
+          }}
+        />
+      ) : null}
 
       {selectionOverlay !== null && bubblePosition !== null ? (
         <div
