@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   createObjectsEnvironmentAtoms,
   EMPTY_OBJECTS_ENVIRONMENT_STATE,
@@ -17,6 +18,8 @@ import type {
   T3ObjectSummary,
   ThreadId,
 } from "@t3tools/contracts";
+import type * as Cause from "effect/Cause";
+import { Atom } from "effect/reactivity";
 import { useMessages } from "gt-react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -24,6 +27,15 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { formatEnvironmentQueryError, useEnvironmentQuery } from "./query";
 
 const objectsEnvironment = createObjectsEnvironmentAtoms(connectionAtomRuntime);
+const NEVER_ALLOWED_ATOM = Atom.make(false).pipe(Atom.withLabel("objects:never-allowed"));
+
+export function useCanMutateObjects(environmentId: EnvironmentId | null): boolean {
+  return useAtomValue(
+    environmentId === null
+      ? NEVER_ALLOWED_ATOM
+      : objectsEnvironment.mutateDesign.permissionAtom(environmentId),
+  );
+}
 
 export function useObjectsEnvironmentState(environmentId: EnvironmentId | null): {
   readonly state: ObjectsEnvironmentState;
@@ -59,12 +71,12 @@ export function sortedObjectSummaries(
 async function unwrapCommand<A>(
   promise: Promise<
     | { readonly _tag: "Success"; readonly value: A }
-    | { readonly _tag: "Failure"; readonly cause: unknown }
+    | { readonly _tag: "Failure"; readonly cause: Cause.Cause<unknown> }
   >,
 ): Promise<A> {
   const result = await promise;
   if (result._tag === "Success") return result.value;
-  return Promise.reject(new Error(formatEnvironmentQueryError(result.cause as never)));
+  return Promise.reject(new Error(formatEnvironmentQueryError(result.cause)));
 }
 
 export function readT3Object(environmentId: EnvironmentId, id: T3ObjectId): Promise<T3Object> {

@@ -190,6 +190,20 @@ export const T3Object = Schema.Struct({
 });
 export type T3Object = typeof T3Object.Type;
 
+export function toT3ObjectSummary(object: T3Object): T3ObjectSummary {
+  return {
+    id: object.id,
+    kind: object.kind,
+    title: object.title,
+    revision: object.revision,
+    nodeCount: object.nodeCount,
+    createdByThreadId: object.createdByThreadId,
+    createdAt: object.createdAt,
+    updatedAt: object.updatedAt,
+    archivedAt: object.archivedAt,
+  };
+}
+
 export const T3ObjectRevisionSummary = Schema.Struct({
   objectId: T3ObjectId,
   revision: PositiveInt,
@@ -401,6 +415,9 @@ export const T3ObjectCreateInput = Schema.Struct({
   kind: T3ObjectKind,
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   document: Schema.optional(DesignDocument),
+  ops: Schema.optional(
+    Schema.Array(DesignMutationOp).check(Schema.isMinLength(1), Schema.isMaxLength(500)),
+  ),
   summary: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(500))),
   threadId: Schema.optional(Schema.NullOr(ThreadId)),
 });
@@ -494,11 +511,11 @@ export const T3ObjectStreamEvent = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("created"),
-    object: T3Object,
+    object: T3ObjectSummary,
   }),
   Schema.Struct({
     type: Schema.Literal("updated"),
-    object: T3Object,
+    object: T3ObjectSummary,
     revision: T3ObjectRevisionSummary,
   }),
   Schema.Struct({

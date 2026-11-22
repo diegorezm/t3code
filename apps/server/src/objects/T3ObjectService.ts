@@ -4,6 +4,7 @@ import {
   T3ObjectError,
   T3ObjectId,
   emptyDesignDocument,
+  toT3ObjectSummary,
   type T3Object,
   type T3ObjectActor,
   type T3ObjectCreateInput,
@@ -117,15 +118,27 @@ function toRevisionSummary(row: RevisionSummaryRow): T3ObjectRevisionSummary {
   };
 }
 
-function mapStorageError(message: string, objectId?: T3ObjectId) {
-  return (error: unknown): T3ObjectError =>
-    isT3ObjectError(error)
-      ? error
-      : new T3ObjectError({
-          code: "storage_error",
-          message,
-          ...(objectId !== undefined ? { objectId } : {}),
-        });
+function mapStorageFailure<A, E, R>(message: string, objectId?: T3ObjectId) {
+  return (effect: Effect.Effect<A, E, R>): Effect.Effect<A, T3ObjectError, R> =>
+    effect.pipe(
+      Effect.tapError((error) =>
+        isT3ObjectError(error)
+          ? Effect.void
+          : Effect.logError(message, {
+              ...(objectId !== undefined ? { objectId } : {}),
+              cause: error,
+            }),
+      ),
+      Effect.mapError((error): T3ObjectError =>
+        isT3ObjectError(error)
+          ? error
+          : new T3ObjectError({
+              code: "storage_error",
+              message,
+              ...(objectId !== undefined ? { objectId } : {}),
+            }),
+      ),
+    );
 }
 
 function notFoundError(objectId: T3ObjectId): T3ObjectError {
@@ -192,7 +205,8 @@ export class T3ObjectService extends Context.Service<
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const random = yield* SecureRandom.SecureRandom;
-  const eventsPubSub = yield* PubSub.unbounded<T3ObjectStreamEvent>();
+  // Bounded sliding PubSub prevents slow remote subscribers from accumulating unbounded memory.
+  const eventsPubSub = yield* PubSub.sliding<T3ObjectStreamEvent>(256);
 
   const decodeStoredContent = Effect.fn("T3ObjectService.decodeStoredContent")(function* (
     rawJson: string,
@@ -270,44 +284,17 @@ const make = Effect.gen(function* () {
   });
 
   const list = Effect.fn("T3ObjectService.list")(function* (input?: T3ObjectListInput) {
-    const includeArchived = input?.includeArchived === true;
-    const kind = input?.kind;
-    const rows = yield* (
-      includeArchived && kind !== undefined
-        ? sql<ObjectSummaryRow>`
-            SELECT
-              id, kind, title, revision, node_count,
-              created_by_thread_id, created_at, updated_at, archived_at
-            FROM t3_objects
-            WHERE kind = ${kind}
-            ORDER BY updated_at DESC, id ASC
-          `
-        : includeArchived
-          ? sql<ObjectSummaryRow>`
-              SELECT
-                id, kind, title, revision, node_count,
-                created_by_thread_id, created_at, updated_at, archived_at
-              FROM t3_objects
-              ORDER BY updated_at DESC, id ASC
-            `
-          : kind !== undefined
-            ? sql<ObjectSummaryRow>`
-                SELECT
-                  id, kind, title, revision, node_count,
-                  created_by_thread_id, created_at, updated_at, archived_at
-                FROM t3_objects
-                WHERE archived_at IS NULL AND kind = ${kind}
-                ORDER BY updated_at DESC, id ASC
-              `
-            : sql<ObjectSummaryRow>`
-                SELECT
-                  id, kind, title, revision, node_count,
-                  created_by_thread_id, created_at, updated_at, archived_at
-                FROM t3_objects
-                WHERE archived_at IS NULL
-                ORDER BY updated_at DESC, id ASC
-              `
-    ).pipe(Effect.mapError(mapStorageError("Failed to list objects.")));
+    const includeArchivedFlag = input?.includeArchived === true ? 1 : 0;
+    const kind = input?.kind ?? null;
+    const rows = yield* sql<ObjectSummaryRow>`
+      SELECT
+        id, kind, title, revision, node_count,
+        created_by_thread_id, created_at, updated_at, archived_at
+      FROM t3_objects
+      WHERE (${includeArchivedFlag} = 1 OR archived_at IS NULL)
+        AND (${kind} IS NULL OR kind = ${kind})
+      ORDER BY updated_at DESC, id ASC
+    `.pipe(mapStorageFailure("Failed to list objects."));
 
     return {
       objects: rows.map(toSummary),
@@ -316,7 +303,7 @@ const make = Effect.gen(function* () {
 
   const read = Effect.fn("T3ObjectService.read")(function* (input: T3ObjectReadInput) {
     const row = yield* selectObjectRow(input.id).pipe(
-      Effect.mapError(mapStorageError("Failed to read object.", input.id)),
+      mapStorageFailure("Failed to read object.", input.id),
     );
     const object = yield* decodeObjectRow(row);
     return { object } satisfies T3ObjectReadResult;
@@ -325,7 +312,24 @@ const make = Effect.gen(function* () {
   const create = Effect.fn("T3ObjectService.create")(function* (
     input: T3ObjectCreateInput & { readonly actor?: T3ObjectActor },
   ) {
-    const document = input.document ?? emptyDesignDocument();
+    const baseDocument = input.document ?? emptyDesignDocument();
+    let document = baseDocument;
+    if (input.ops !== undefined && input.ops.length > 0) {
+      const idSeed = yield* random.uuidV4().pipe(Effect.orDie);
+      const idPrefix = idSeed.slice(0, 8);
+      let generatedCounter = 1;
+      const applied = applyDesignMutations(baseDocument, input.ops, () =>
+        DesignNodeId.make(`n_${idPrefix}_${generatedCounter++}`),
+      );
+      if (!applied.ok) {
+        return yield* new T3ObjectError({
+          code: "invalid_request",
+          message: applied.message,
+        });
+      }
+      document = applied.document;
+    }
+
     const validation = validateDesignDocument(document);
     if (!validation.ok) {
       return yield* new T3ObjectError({
@@ -366,7 +370,7 @@ const make = Effect.gen(function* () {
           `;
         }),
       )
-      .pipe(Effect.mapError(mapStorageError("Failed to create object.", id)));
+      .pipe(mapStorageFailure("Failed to create object.", id));
 
     const object: T3Object = {
       id,
@@ -389,7 +393,7 @@ const make = Effect.gen(function* () {
       createdAt,
     };
 
-    yield* PubSub.publish(eventsPubSub, { type: "created", object });
+    yield* PubSub.publish(eventsPubSub, { type: "created", object: toT3ObjectSummary(object) });
     return { object, revision } satisfies T3ObjectMutationResult;
   });
 
@@ -407,7 +411,7 @@ const make = Effect.gen(function* () {
           return { ...existing, title: input.title, updated_at: updatedAt } satisfies ObjectRow;
         }),
       )
-      .pipe(Effect.mapError(mapStorageError("Failed to rename object.", input.id)));
+      .pipe(mapStorageFailure("Failed to rename object.", input.id));
 
     const object = yield* decodeObjectRow(row);
     yield* PubSub.publish(eventsPubSub, {
@@ -440,7 +444,7 @@ const make = Effect.gen(function* () {
           } satisfies ObjectRow;
         }),
       )
-      .pipe(Effect.mapError(mapStorageError("Failed to update archive state.", input.id)));
+      .pipe(mapStorageFailure("Failed to update archive state.", input.id));
 
     const object = yield* decodeObjectRow(row);
     yield* PubSub.publish(eventsPubSub, {
@@ -465,7 +469,7 @@ const make = Effect.gen(function* () {
           return true;
         }),
       )
-      .pipe(Effect.mapError(mapStorageError("Failed to delete object.", input.id)));
+      .pipe(mapStorageFailure("Failed to delete object.", input.id));
 
     if (existed) {
       yield* PubSub.publish(eventsPubSub, { type: "deleted", id: input.id });
@@ -554,11 +558,11 @@ const make = Effect.gen(function* () {
           return { object, revision } satisfies T3ObjectMutationResult;
         }),
       )
-      .pipe(Effect.mapError(mapStorageError("Failed to update object.", input.id)));
+      .pipe(mapStorageFailure("Failed to update object.", input.id));
 
     yield* PubSub.publish(eventsPubSub, {
       type: "updated",
-      object: result.object,
+      object: toT3ObjectSummary(result.object),
       revision: result.revision,
     });
     return result;
@@ -648,7 +652,7 @@ const make = Effect.gen(function* () {
         ORDER BY revision DESC
         LIMIT ${limit}
       `;
-    }).pipe(Effect.mapError(mapStorageError("Failed to list object revisions.", input.id)));
+    }).pipe(mapStorageFailure("Failed to list object revisions.", input.id));
 
     return {
       revisions: rows.map(toRevisionSummary),
@@ -664,7 +668,7 @@ const make = Effect.gen(function* () {
       WHERE object_id = ${input.id} AND revision = ${input.revision}
       LIMIT 1
     `.pipe(
-      Effect.mapError(mapStorageError("Failed to read object revision.", input.id)),
+      mapStorageFailure("Failed to read object revision.", input.id),
       Effect.flatMap((rows) => {
         const match = rows[0];
         if (match === undefined) {

@@ -20,14 +20,13 @@ import {
   App,
   DragEvent,
   Group,
-  Leafer,
   MoveEvent,
   PointerEvent as LeaferPointerEvent,
   ZoomEvent,
   type IUI,
-  type IUIInputData,
 } from "leafer-ui";
-import { useGT } from "gt-react";
+import { T, useGT } from "gt-react";
+import { ZoomInIcon, ZoomOutIcon } from "lucide-react";
 import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
@@ -38,6 +37,8 @@ import {
   useState,
 } from "react";
 
+import { Button } from "~/components/ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 import {
@@ -52,9 +53,11 @@ import {
   type ViewportSize,
   type ViewportTransform,
 } from "./designEditorTypes";
+import { exportLeaferNodesToPng } from "./designExport";
 import {
+  buildLeaferNodePatchInput,
+  canPatchLeaferSceneInPlace,
   designDocumentToLeaferTree,
-  designNodeToLeaferInput,
   extractTransformTargets,
   FRAME_LABEL_OFFSET_Y,
   parseFrameLabelNodeId,
@@ -65,7 +68,7 @@ export interface DesignCanvasHandle {
   readonly fitView: () => void;
   readonly zoomIn: () => void;
   readonly zoomOut: () => void;
-  readonly getNodeAnchorWorld: (id: DesignNodeId) => Point2D | null;
+  readonly getSelectionAnchorWorld: (ids: ReadonlyArray<DesignNodeId>) => Point2D | null;
   readonly getViewportCenterWorld: () => Point2D;
   readonly startRename: (id: DesignNodeId) => void;
   readonly isEditingText: () => boolean;
@@ -229,13 +232,12 @@ export function DesignCanvasViewport({
   tool,
   selectedIds,
   pickActive,
+  readOnly = false,
   selectionAnchorWorld,
   selectionOverlay,
   bottomOverlay,
   spacePressed,
   handleRef,
-  onViewportChange,
-  onViewportSizeChange,
   onSelectIds,
   onPickNode,
   onAddNode,
@@ -246,13 +248,12 @@ export function DesignCanvasViewport({
   readonly tool: DesignTool;
   readonly selectedIds: ReadonlyArray<DesignNodeId>;
   readonly pickActive: boolean;
+  readonly readOnly?: boolean;
   readonly selectionAnchorWorld: Point2D | null;
   readonly selectionOverlay: ReactNode;
   readonly bottomOverlay?: ReactNode;
   readonly spacePressed: boolean;
   readonly handleRef: { current: DesignCanvasHandle | null };
-  readonly onViewportChange: (next: ViewportTransform) => void;
-  readonly onViewportSizeChange: (size: ViewportSize) => void;
   readonly onSelectIds: (ids: ReadonlyArray<DesignNodeId>) => void;
   readonly onPickNode: (id: DesignNodeId | null, anchorWorld: Point2D | null) => void;
   readonly onAddNode: (input: DesignNodeInput) => void;
@@ -267,6 +268,7 @@ export function DesignCanvasViewport({
   const appRef = useRef<App | null>(null);
   const contentLayerRef = useRef<Group | null>(null);
   const frameLabelsRef = useRef<Map<string, IUI>>(new Map());
+  const prevDocRef = useRef<DesignDocument | null>(null);
   const syncingSelectionRef = useRef(false);
   const editingTextRef = useRef(false);
   const dirtyIdsRef = useRef<Set<string>>(new Set());
@@ -283,10 +285,9 @@ export function DesignCanvasViewport({
     tool,
     selectedIds,
     pickActive,
+    readOnly,
     spacePressed,
     inlineRename,
-    onViewportChange,
-    onViewportSizeChange,
     onSelectIds,
     onPickNode,
     onAddNode,
@@ -301,10 +302,9 @@ export function DesignCanvasViewport({
       tool,
       selectedIds,
       pickActive,
+      readOnly,
       spacePressed,
       inlineRename,
-      onViewportChange,
-      onViewportSizeChange,
       onSelectIds,
       onPickNode,
       onAddNode,
@@ -319,9 +319,7 @@ export function DesignCanvasViewport({
     if (element === null) return;
     const applySize = (width: number, height: number) => {
       if (width > 0 && height > 0) {
-        const next = { width: Math.round(width), height: Math.round(height) };
-        setViewportSize(next);
-        latestRef.current.onViewportSizeChange(next);
+        setViewportSize({ width: Math.round(width), height: Math.round(height) });
       }
     };
     const initialRect = element.getBoundingClientRect();
@@ -374,12 +372,11 @@ export function DesignCanvasViewport({
 
     appRef.current = app;
     contentLayerRef.current = contentLayer;
+    prevDocRef.current = null;
     hasAutoFitRef.current = false;
 
     const emitViewport = () => {
-      const next = readTreeViewport(app);
-      setViewport(next);
-      latestRef.current.onViewportChange(next);
+      setViewport(readTreeViewport(app));
     };
     emitViewport();
 
@@ -510,6 +507,7 @@ export function DesignCanvasViewport({
     };
 
     const openInlineRename = (nodeId: DesignNodeId) => {
+      if (latestRef.current.readOnly) return;
       const node = latestRef.current.doc.nodes[nodeId];
       if (node === undefined) return;
       const vp = readTreeViewport(app);
@@ -688,135 +686,17 @@ export function DesignCanvasViewport({
       }
     });
 
-    const exportNodesToPng = async (
+    const exportNodesToPng = (
       nodeIds: ReadonlyArray<DesignNodeId> | null,
       options?: { readonly transparent?: boolean; readonly scale?: number },
-    ): Promise<Blob | null> => {
-      const activeDoc = latestRef.current.doc;
-      const isFullCanvas = nodeIds === null;
-      const targetIds = isFullCanvas
-        ? activeDoc.rootIds.filter((id) => activeDoc.nodes[id]?.visible !== false)
-        : normalizeSelectedNodeIds(activeDoc, nodeIds);
-      if (targetIds.length === 0) return null;
-
-      interface ExportItemSpec {
-        readonly id: DesignNodeId;
-        readonly renderBounds: {
-          readonly x: number;
-          readonly y: number;
-          readonly width: number;
-          readonly height: number;
-        };
-        readonly originX: number;
-        readonly originY: number;
-        readonly boxWidth: number;
-        readonly boxHeight: number;
-      }
-
-      const specs: Array<ExportItemSpec> = [];
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-
-      for (const id of targetIds) {
-        const node = activeDoc.nodes[id];
-        if (node === undefined) continue;
-        const leaf = contentLayer.findId(id) as IUI | undefined;
-        if (leaf !== undefined) {
-          const rb = leaf.getBounds("render", "page");
-          const worldOrigin = leaf.getWorldPoint({ x: 0, y: 0 });
-          const pageOrigin = contentLayer.getInnerPoint(worldOrigin);
-          const boxWidth = Math.max(1, leaf.boxBounds.width || node.width);
-          const boxHeight = Math.max(1, leaf.boxBounds.height || node.height);
-          specs.push({
-            id,
-            renderBounds: rb,
-            originX: pageOrigin.x,
-            originY: pageOrigin.y,
-            boxWidth,
-            boxHeight,
-          });
-          minX = Math.min(minX, rb.x);
-          minY = Math.min(minY, rb.y);
-          maxX = Math.max(maxX, rb.x + rb.width);
-          maxY = Math.max(maxY, rb.y + rb.height);
-        } else {
-          specs.push({
-            id,
-            renderBounds: { x: node.x, y: node.y, width: node.width, height: node.height },
-            originX: node.x,
-            originY: node.y,
-            boxWidth: Math.max(1, node.width),
-            boxHeight: Math.max(1, node.height),
-          });
-          minX = Math.min(minX, node.x);
-          minY = Math.min(minY, node.y);
-          maxX = Math.max(maxX, node.x + node.width);
-          maxY = Math.max(maxY, node.y + node.height);
-        }
-      }
-
-      if (specs.length === 0 || !Number.isFinite(minX) || !Number.isFinite(minY)) return null;
-
-      const padding = isFullCanvas ? 24 : 0;
-      const exportWidth = Math.max(1, Math.ceil(maxX - minX + padding * 2));
-      const exportHeight = Math.max(1, Math.ceil(maxY - minY + padding * 2));
-      const requestedScale = options?.scale ?? 2;
-      const maxDim = Math.max(exportWidth, exportHeight);
-      const pixelRatio = Math.max(1, Math.min(requestedScale, Math.floor(8192 / maxDim) || 1));
-
-      const builtItems: Array<IUIInputData> = [];
-      for (const spec of specs) {
-        const input = designNodeToLeaferInput(activeDoc, spec.id, false);
-        if (input === null) continue;
-        builtItems.push({
-          ...input,
-          x: spec.originX - minX + padding,
-          y: spec.originY - minY + padding,
-          width: spec.boxWidth,
-          height: spec.boxHeight,
-          visible: true,
-          editable: false,
-        });
-      }
-      if (builtItems.length === 0) return null;
-
-      const transparent = options?.transparent ?? !isFullCanvas;
-      const backgroundFill = transparent
-        ? ""
-        : (activeDoc.background ??
-          (typeof window !== "undefined"
-            ? window.getComputedStyle(mountEl).backgroundColor || "#0f1117"
-            : "#0f1117"));
-
-      const offscreenCanvas = document.createElement("canvas");
-      const exportLeafer = new Leafer({
-        view: offscreenCanvas,
-        width: exportWidth,
-        height: exportHeight,
-        pixelRatio,
-        fill: backgroundFill,
+    ): Promise<Blob | null> =>
+      exportLeaferNodesToPng({
+        doc: latestRef.current.doc,
+        contentLayer,
+        mountEl,
+        nodeIds,
+        options,
       });
-
-      try {
-        exportLeafer.add(builtItems as never);
-        exportLeafer.updateLayout();
-        exportLeafer.forceRender(undefined, true);
-        // Allow one frame for any image/SVG data URLs to paint onto the offscreen canvas.
-        await new Promise<void>((resolve) => {
-          window.requestAnimationFrame(() => resolve());
-        });
-        exportLeafer.updateLayout();
-        exportLeafer.forceRender(undefined, true);
-
-        return await new Promise<Blob | null>((resolve) => {
-          offscreenCanvas.toBlob((blob) => resolve(blob), "image/png");
-        });
-      } finally {
-        exportLeafer.destroy();
-      }
-    };
 
     handleRef.current = {
       fitView: () => {
@@ -846,14 +726,25 @@ export function DesignCanvasViewport({
         const base = zoomAnim !== null ? zoomAnim.targetZoom : getCurrentZoom();
         smoothZoomTo(base / 1.25, center, false);
       },
-      getNodeAnchorWorld: (id: DesignNodeId) => {
-        const leaf = contentLayer.findId(id) as IUI | undefined;
-        if (leaf === undefined) return null;
-        const bounds = leaf.worldBoxBounds;
+      getSelectionAnchorWorld: (ids: ReadonlyArray<DesignNodeId>) => {
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const id of ids) {
+          const leaf = contentLayer.findId(id) as IUI | undefined;
+          if (leaf === undefined) continue;
+          const bounds = leaf.worldBoxBounds;
+          minX = Math.min(minX, bounds.x);
+          maxX = Math.max(maxX, bounds.x + bounds.width);
+          maxY = Math.max(maxY, bounds.y + bounds.height);
+        }
+        if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+          return null;
+        }
         const vp = readTreeViewport(app);
         return {
-          x: (bounds.x + bounds.width / 2 - vp.x) / vp.zoom,
-          y: (bounds.y + bounds.height - vp.y) / vp.zoom,
+          x: ((minX + maxX) / 2 - vp.x) / vp.zoom,
+          y: (maxY - vp.y) / vp.zoom,
         };
       },
       getViewportCenterWorld: () => {
@@ -875,48 +766,87 @@ export function DesignCanvasViewport({
       handleRef.current = null;
       appRef.current = null;
       contentLayerRef.current = null;
+      prevDocRef.current = null;
       frameLabelsRef.current.clear();
       app.destroy();
     };
   }, [handleRef]);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reconciles the Leafer scene graph whenever the DesignDocument changes
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reconciles the Leafer scene graph incrementally when topology is unchanged, or rebuilds on structural edits
   useEffect(() => {
     const app = appRef.current;
     const contentLayer = contentLayerRef.current;
     if (app === null || contentLayer === null || editingTextRef.current) return;
 
-    syncingSelectionRef.current = true;
-    app.editor.target = [];
-    contentLayer.clear();
-    frameLabelsRef.current.clear();
-    const nodes = designDocumentToLeaferTree(doc);
-    if (nodes.length > 0) {
-      contentLayer.add(nodes as never);
-      for (const child of contentLayer.children) {
-        const labelNodeId = parseFrameLabelNodeId(child.name);
-        if (labelNodeId !== null) {
-          frameLabelsRef.current.set(labelNodeId, child as IUI);
+    const prevDoc = prevDocRef.current;
+    let patchedInPlace = false;
+    if (prevDoc !== null && canPatchLeaferSceneInPlace(prevDoc, doc)) {
+      patchedInPlace = true;
+      for (const [id, node] of Object.entries(doc.nodes)) {
+        if (prevDoc.nodes[id] === node) continue;
+        const leaf = contentLayer.findId(id) as IUI | undefined;
+        if (leaf === undefined) {
+          patchedInPlace = false;
+          break;
         }
+        const parent = node.parentId === null ? undefined : doc.nodes[node.parentId];
+        const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
+        const patch = buildLeaferNodePatchInput(doc, node.id, inAutoLayoutParent);
+        if (patch === null) {
+          patchedInPlace = false;
+          break;
+        }
+        leaf.set(patch);
+        if (node.type === "frame" && node.parentId === null) {
+          const label = frameLabelsRef.current.get(node.id);
+          if (label !== undefined) {
+            label.set({
+              text: node.name,
+              x: node.x,
+              y: node.y - FRAME_LABEL_OFFSET_Y,
+            });
+          }
+        }
+      }
+      if (patchedInPlace) {
+        app.tree.updateLayout();
+        app.editor.updateEditBox();
       }
     }
 
-    if (!hasAutoFitRef.current && doc.rootIds.length > 0) {
-      hasAutoFitRef.current = true;
-      app.tree.zoom("fit", 48);
-      const next = readTreeViewport(app);
-      setViewport(next);
-      latestRef.current.onViewportChange(next);
+    if (!patchedInPlace) {
+      syncingSelectionRef.current = true;
+      app.editor.target = [];
+      contentLayer.clear();
+      frameLabelsRef.current.clear();
+      const nodes = designDocumentToLeaferTree(doc);
+      if (nodes.length > 0) {
+        contentLayer.add(nodes as never);
+        for (const child of contentLayer.children) {
+          const labelNodeId = parseFrameLabelNodeId(child.name);
+          if (labelNodeId !== null) {
+            frameLabelsRef.current.set(labelNodeId, child as IUI);
+          }
+        }
+      }
+
+      if (!hasAutoFitRef.current && doc.rootIds.length > 0) {
+        hasAutoFitRef.current = true;
+        app.tree.zoom("fit", 48);
+        setViewport(readTreeViewport(app));
+      }
+
+      const activeSelectedIds = normalizeSelectedNodeIds(doc, latestRef.current.selectedIds);
+      const activeRenameId = latestRef.current.inlineRename?.nodeId ?? null;
+      syncFrameLabelAppearance(frameLabelsRef.current, activeSelectedIds, activeRenameId);
+
+      if (activeSelectedIds.length > 0 && !latestRef.current.pickActive) {
+        applySelectionToEditor(app, contentLayer, activeSelectedIds);
+      }
+      syncingSelectionRef.current = false;
     }
 
-    const activeSelectedIds = normalizeSelectedNodeIds(doc, latestRef.current.selectedIds);
-    const activeRenameId = latestRef.current.inlineRename?.nodeId ?? null;
-    syncFrameLabelAppearance(frameLabelsRef.current, activeSelectedIds, activeRenameId);
-
-    if (activeSelectedIds.length > 0 && !latestRef.current.pickActive) {
-      applySelectionToEditor(app, contentLayer, activeSelectedIds);
-    }
-    syncingSelectionRef.current = false;
+    prevDocRef.current = doc;
   }, [doc]);
 
   const renamingNodeId = inlineRename?.nodeId ?? null;
@@ -953,21 +883,21 @@ export function DesignCanvasViewport({
     return () => window.cancelAnimationFrame(rafId);
   }, [renamingNodeId]);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- switches Leafer pan/edit/pick modes when tool, Space key, or Annotate mode changes
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- switches Leafer pan/edit/pick modes when tool, Space key, read-only permission, or Annotate mode changes
   useEffect(() => {
     const app = appRef.current;
     if (app === null) return;
 
     const panMode = spacePressed || (!pickActive && tool === "hand");
-    const drawMode = !pickActive && !spacePressed && isDrawTool(tool);
+    const drawMode = !readOnly && !pickActive && !spacePressed && isDrawTool(tool);
 
     if (app.config.move !== undefined) {
       app.config.move.drag = panMode;
     }
-    const editorActive = !panMode && !pickActive && !drawMode;
+    const editorActive = !readOnly && !panMode && !pickActive && !drawMode;
     app.editor.hittable = editorActive;
     app.editor.visible = editorActive;
-  }, [tool, pickActive, spacePressed]);
+  }, [tool, pickActive, readOnly, spacePressed]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks drag-to-draw creation gesture on window for frame/rect/ellipse/text/line tools
   useEffect(() => {
@@ -1037,7 +967,7 @@ export function DesignCanvasViewport({
   }, []);
 
   const handleDrawPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || !isDrawTool(tool)) return;
+    if (readOnly || event.button !== 0 || !isDrawTool(tool)) return;
     event.preventDefault();
     const rect = hostRef.current?.getBoundingClientRect();
     const app = appRef.current;
@@ -1141,7 +1071,7 @@ export function DesignCanvasViewport({
   };
 
   const panMode = spacePressed || (!pickActive && tool === "hand");
-  const drawMode = !pickActive && !spacePressed && isDrawTool(tool);
+  const drawMode = !readOnly && !pickActive && !spacePressed && isDrawTool(tool);
 
   const inlineRenamePosition =
     inlineRename !== null && inlineRename.nodeId in doc.nodes
@@ -1272,6 +1202,58 @@ export function DesignCanvasViewport({
       ) : null}
 
       {bottomOverlay ?? null}
+
+      {viewportSize.width >= 460 ? (
+        <div
+          className="dropdown-glass pointer-events-auto absolute right-3 bottom-3 z-30 flex items-center gap-0.5 rounded-lg border border-border/70 p-0.5 shadow-md"
+          onPointerDown={(event) => event.stopPropagation()}
+          onWheel={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.stopPropagation()}
+        >
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={gt("Zoom out")}
+                  onClick={() => handleRef.current?.zoomOut()}
+                />
+              }
+            >
+              <ZoomOutIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup>
+              <T>Zoom out</T>
+            </TooltipPopup>
+          </Tooltip>
+          <button
+            type="button"
+            className="min-w-10 rounded px-1 py-0.5 text-2xs tabular-nums text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+            aria-label={gt("Fit to canvas (0)")}
+            onClick={() => handleRef.current?.fitView()}
+          >
+            {Math.round(viewport.zoom * 100)}%
+          </button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={gt("Zoom in")}
+                  onClick={() => handleRef.current?.zoomIn()}
+                />
+              }
+            >
+              <ZoomInIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup>
+              <T>Zoom in</T>
+            </TooltipPopup>
+          </Tooltip>
+        </div>
+      ) : null}
     </div>
   );
 }

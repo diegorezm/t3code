@@ -46,13 +46,14 @@ import {
   deleteT3Object,
   setT3ObjectArchived,
   sortedObjectSummaries,
+  useCanMutateObjects,
   useObjectsEnvironmentState,
 } from "~/state/objects";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { DesignObjectWorkspace } from "./DesignObjectWorkspace";
 
 function makeStarterDesignDocument() {
-  const result = applyDesignMutations(emptyDesignDocument("#0b0d14"), [
+  const result = applyDesignMutations(emptyDesignDocument(), [
     {
       op: "add",
       node: {
@@ -107,7 +108,7 @@ function makeStarterDesignDocument() {
       },
     },
   ]);
-  return result.ok ? result.document : emptyDesignDocument("#0b0d14");
+  return result.ok ? result.document : emptyDesignDocument();
 }
 
 function useActiveObjectsEnvironmentId(preferred?: string): EnvironmentId | null {
@@ -131,6 +132,7 @@ export function ObjectsPage() {
   const search = useSearch({ from: "/_chat/objects" });
   const environmentId = useActiveObjectsEnvironmentId(search.objectEnvId);
   const { state, loaded, error } = useObjectsEnvironmentState(environmentId);
+  const canMutate = useCanMutateObjects(environmentId);
 
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -214,7 +216,7 @@ export function ObjectsPage() {
         </WorkspaceBreadcrumb>
 
         <div className="flex items-center gap-2 [-webkit-app-region:no-drag]">
-          <Button size="xs" disabled={creating} onClick={handleCreate}>
+          <Button size="xs" disabled={!canMutate || creating} onClick={handleCreate}>
             <PlusIcon className="size-3.5" />
             <span>
               <T>New design</T>
@@ -273,7 +275,7 @@ export function ObjectsPage() {
               </EmptyHeader>
               {normalizedQuery.length === 0 ? (
                 <EmptyContent>
-                  <Button size="sm" disabled={creating} onClick={handleCreate}>
+                  <Button size="sm" disabled={!canMutate || creating} onClick={handleCreate}>
                     <PlusIcon className="size-3.5" />
                     <span>
                       <T>New design</T>
@@ -311,7 +313,9 @@ export function ObjectsPage() {
                         <span className="truncate text-xs text-muted-foreground">
                           <span className="capitalize">{item.kind}</span>
                           {" · "}
-                          {item.nodeCount} {item.nodeCount === 1 ? <T>layer</T> : <T>layers</T>}
+                          {gt("{count, plural, one {{count} layer} other {{count} layers}}", {
+                            count: item.nodeCount,
+                          })}
                           {" · "}v{item.revision}
                           {" · "}
                           {new Date(item.updatedAt).toLocaleDateString()}
@@ -326,6 +330,7 @@ export function ObjectsPage() {
                             <Button
                               size="icon-xs"
                               variant="ghost"
+                              disabled={!canMutate}
                               aria-label={isArchived ? gt("Unarchive") : gt("Archive")}
                               onClick={() => {
                                 void setT3ObjectArchived(environmentId, item.id, !isArchived);
@@ -349,6 +354,7 @@ export function ObjectsPage() {
                             <Button
                               size="icon-xs"
                               variant="ghost-destructive"
+                              disabled={!canMutate}
                               aria-label={gt("Delete")}
                               onClick={() => {
                                 void deleteT3Object(environmentId, item.id);

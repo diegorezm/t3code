@@ -1,57 +1,35 @@
-import {
-  emptyDesignDocument,
-  type DesignDocument,
-  type DesignMutationOp,
-  type DesignNode,
-  type DesignNodeId,
-  type DesignNodeInput,
-  type DesignNodePatch,
-  type EnvironmentId,
-  type PreviewAnnotationPayload,
-  type ScopedThreadRef,
-  type T3Object,
-  type T3ObjectId,
-  type T3ObjectRevisionSummary,
+import type {
+  DesignMutationOp,
+  DesignNode,
+  DesignNodeId,
+  DesignNodeInput,
+  DesignNodePatch,
+  EnvironmentId,
+  PreviewAnnotationPayload,
+  ScopedThreadRef,
+  T3Object,
+  T3ObjectId,
 } from "@t3tools/contracts";
-import { applyDesignMutations } from "@t3tools/shared/designDocument";
 import { renderDesignToHtml, renderDesignToSvg } from "@t3tools/shared/designRender";
-import { T, useGT, Var } from "gt-react";
+import { T, useGT } from "gt-react";
 import {
-  ArrowDownIcon,
-  ArrowDownToLineIcon,
-  ArrowUpIcon,
-  ArrowUpToLineIcon,
   CircleIcon,
-  ClipboardPasteIcon,
-  CopyIcon,
-  CopyPlusIcon,
   DownloadIcon,
-  EyeIcon,
-  EyeOffIcon,
   FileCodeIcon,
   FrameIcon,
   HandIcon,
   ImageIcon,
   LayersIcon,
-  LockIcon,
   Maximize2Icon,
-  MessageSquarePlusIcon,
   MinusIcon,
   MousePointer2Icon,
   MousePointerClickIcon,
   PanelRightIcon,
-  PencilIcon,
   Redo2Icon,
-  ScissorsIcon,
   ShapesIcon,
   SquareIcon,
-  Trash2Icon,
   TypeIcon,
   Undo2Icon,
-  Unlink2Icon,
-  UnlockIcon,
-  ZoomInIcon,
-  ZoomOutIcon,
 } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
@@ -64,17 +42,7 @@ import {
 import { FILE_SURFACE_SUBHEADER_CLASS } from "~/components/files/fileSurfaceChrome";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import {
-  Menu,
-  MenuItem,
-  MenuPopup,
-  MenuSeparator,
-  MenuShortcut,
-  MenuSub,
-  MenuSubPopup,
-  MenuSubTrigger,
-  MenuTrigger,
-} from "~/components/ui/menu";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "~/components/ui/menu";
 import { Spinner } from "~/components/ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import {
@@ -85,31 +53,21 @@ import {
 } from "~/components/WorkspaceBreadcrumb";
 import { WorkspacePageHeader } from "~/components/WorkspacePageHeader";
 import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
-import { cn, isMacPlatform } from "~/lib/utils";
-import {
-  listT3ObjectRevisions,
-  mutateDesignObject,
-  readT3Object,
-  renameT3Object,
-  restoreT3ObjectRevision,
-  useObjectsEnvironmentState,
-} from "~/state/objects";
+import { cn } from "~/lib/utils";
 import {
   DesignCanvasViewport,
   type DesignCanvasContextMenuRequest,
   type DesignCanvasHandle,
 } from "./DesignCanvasViewport";
+import { DesignContextMenu, type DesignContextMenuState } from "./DesignContextMenu";
 import { DesignInspectorPanel, type DesignExportFormat } from "./DesignInspectorPanel";
 import { DesignLayersPanel } from "./DesignLayersPanel";
 import {
   buildDuplicateNodesOps,
   buildPasteNodesOps,
   buildReorderNodeOp,
-  findPreviousRevision,
-  getLayerOrderAvailability,
   getSelectAllNodeIds,
   isEditableTarget,
-  makeNodeInputForTool,
   normalizeSelectedNodeIds,
   parseDesignClipboard,
   serializeDesignClipboard,
@@ -117,72 +75,77 @@ import {
   type DesignTool,
   type LayerOrderDirection,
   type Point2D,
-  type ViewportSize,
-  type ViewportTransform,
 } from "./designEditorTypes";
+import { slugifyFilename, triggerBlobDownload, triggerFileDownload } from "./designExport";
+import { useDesignObjectSession } from "./useDesignObjectSession";
 
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 440;
 
 // In-memory clipboard fallback so Copy/Cut/Paste works reliably even without browser
 // clipboard permissions and persists when switching between Design Objects.
-let sharedDesignClipboard: DesignClipboardPayload | null = null;
-let sharedDesignPasteCount = 0;
+const sharedDesignClipboardState: {
+  payload: DesignClipboardPayload | null;
+  pasteCount: number;
+} = {
+  payload: null,
+  pasteCount: 0,
+};
+
+function readSharedDesignClipboard(): DesignClipboardPayload | null {
+  return sharedDesignClipboardState.payload;
+}
+
+function writeSharedDesignClipboard(payload: DesignClipboardPayload, resetPasteCount = true): void {
+  sharedDesignClipboardState.payload = payload;
+  if (resetPasteCount) {
+    sharedDesignClipboardState.pasteCount = 0;
+  }
+}
+
+function nextSharedDesignPasteCount(): number {
+  return sharedDesignClipboardState.pasteCount + 1;
+}
+
+function recordSharedDesignPasteCount(count: number): void {
+  sharedDesignClipboardState.pasteCount = count;
+}
 
 function clampSidebarWidth(width: number): number {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
 }
 
-function slugifyFilename(title: string): string {
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug.length > 0 ? slug : "design";
-}
-
-function triggerBlobDownload(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function triggerFileDownload(content: string, mimeType: string, filename: string): void {
-  triggerBlobDownload(new Blob([content], { type: mimeType }), filename);
-}
-
-function buildDesignElementAnnotation(input: {
+function buildDesignElementsAnnotation(input: {
   readonly object: T3Object;
-  readonly node: DesignNode;
+  readonly nodes: ReadonlyArray<DesignNode>;
   readonly comment: string;
 }): PreviewAnnotationPayload {
-  const { object, node, comment } = input;
+  const { object, nodes, comment } = input;
   const pageUrl = `t3-object://${object.id}`;
   const pageTitle = `T3 Design Object: ${object.title} (id=${object.id}, rev=${object.revision})`;
   const now = new Date().toISOString();
-  const stylesSummary = [
-    `type=${node.type}`,
-    `x=${Math.round(node.x)}`,
-    `y=${Math.round(node.y)}`,
-    `w=${Math.round(node.width)}`,
-    `h=${Math.round(node.height)}`,
-    ...(node.fill ? [`fill=${node.fill}`] : []),
-    ...(node.stroke ? [`stroke=${node.stroke}`] : []),
-    ...(node.radius ? [`radius=${node.radius}`] : []),
-    ...(node.type === "text" && node.color ? [`color=${node.color}`] : []),
-    ...(node.type === "text" && node.fontSize ? [`fontSize=${node.fontSize}`] : []),
-  ].join("; ");
+  const firstId = nodes[0]?.id ?? "selection";
 
   return {
-    id: `t3-object-annotation-${object.id}-${node.id}-${Date.now()}`,
+    id: `t3-object-annotation-${object.id}-${firstId}-${nodes.length}-${Date.now()}`,
     pageUrl,
     pageTitle,
     comment,
-    elements: [
-      {
+    elements: nodes.map((node) => {
+      const stylesSummary = [
+        `type=${node.type}`,
+        `x=${Math.round(node.x)}`,
+        `y=${Math.round(node.y)}`,
+        `w=${Math.round(node.width)}`,
+        `h=${Math.round(node.height)}`,
+        ...(node.fill ? [`fill=${node.fill}`] : []),
+        ...(node.stroke ? [`stroke=${node.stroke}`] : []),
+        ...(node.radius ? [`radius=${node.radius}`] : []),
+        ...(node.type === "text" && node.color ? [`color=${node.color}`] : []),
+        ...(node.type === "text" && node.fontSize ? [`fontSize=${node.fontSize}`] : []),
+      ].join("; ");
+
+      return {
         id: node.id,
         rect: {
           x: Math.round(node.x),
@@ -202,8 +165,8 @@ function buildDesignElementAnnotation(input: {
           styles: stylesSummary,
           pickedAt: now,
         },
-      },
-    ],
+      };
+    }),
     regions: [],
     strokes: [],
     styleChanges: [],
@@ -211,29 +174,6 @@ function buildDesignElementAnnotation(input: {
     createdAt: now,
   };
 }
-
-interface HistoryNavState {
-  readonly trackedRevision: number;
-  readonly logicalRevision: number;
-  readonly redoStack: ReadonlyArray<number>;
-}
-
-type DesignContextMenuState =
-  | {
-      readonly kind: "node";
-      readonly nodeId: DesignNodeId;
-      readonly nodeIds: ReadonlyArray<DesignNodeId>;
-      readonly x: number;
-      readonly y: number;
-      readonly renameTarget: "canvas" | "layers";
-    }
-  | {
-      readonly kind: "canvas";
-      readonly x: number;
-      readonly y: number;
-      readonly worldX: number;
-      readonly worldY: number;
-    };
 
 export function DesignObjectWorkspace({
   environmentId,
@@ -260,16 +200,6 @@ export function DesignObjectWorkspace({
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const canvasHandleRef = useRef<DesignCanvasHandle | null>(null);
   const pointerInsideRef = useRef(false);
-  const { state: envState } = useObjectsEnvironmentState(environmentId);
-  const streamedObject = envState.objectsById[objectId] ?? null;
-  const streamedSummary = envState.summariesById[objectId] ?? null;
-
-  const [fetchedObject, setFetchedObject] = useState<T3Object | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [optimisticDoc, setOptimisticDoc] = useState<DesignDocument | null>(null);
-  const [revisions, setRevisions] = useState<ReadonlyArray<T3ObjectRevisionSummary>>([]);
-  const [loadedRevisionsKey, setLoadedRevisionsKey] = useState<string | null>(null);
 
   const [tool, setTool] = useState<DesignTool>("select");
   const [selectedIds, setSelectedIds] = useState<ReadonlyArray<DesignNodeId>>([]);
@@ -279,8 +209,6 @@ export function DesignObjectWorkspace({
   const [pickActive, setPickActive] = useState(false);
   const [askChatNote, setAskChatNote] = useState("");
 
-  const [viewport, setViewport] = useState<ViewportTransform>({ x: 80, y: 64, zoom: 1 });
-  const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 800, height: 600 });
   const [spacePressed, setSpacePressed] = useState(false);
   const [showLeftPanel, setShowLeftPanel] = useState(!compact);
   const [leftTab, setLeftTab] = useState<"layers" | "history">("layers");
@@ -295,168 +223,36 @@ export function DesignObjectWorkspace({
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [historyNav, setHistoryNav] = useState<HistoryNavState | null>(null);
 
-  const activeObject: T3Object | null =
-    streamedObject !== null &&
-    (fetchedObject === null || streamedObject.revision >= fetchedObject.revision)
-      ? streamedObject
-      : fetchedObject;
-
-  const currentDoc: DesignDocument =
-    optimisticDoc ?? activeObject?.content.document ?? emptyDesignDocument();
+  const {
+    activeObject,
+    currentDoc,
+    canMutate,
+    loadError,
+    actionError,
+    setActionError,
+    revisions,
+    revisionsLoading,
+    canUndo,
+    canRedo,
+    commitOps,
+    restoreRevision,
+    handleUndo,
+    handleRedo,
+    renameTitle,
+  } = useDesignObjectSession({
+    environmentId,
+    objectId,
+    historyVisible: showLeftPanel && leftTab === "history",
+    onAutoSelectIds: setSelectedIds,
+  });
 
   const normalizedSelectedIds = normalizeSelectedNodeIds(currentDoc, selectedIds);
+  const selectedNodes: ReadonlyArray<DesignNode> = normalizedSelectedIds
+    .map((id) => currentDoc.nodes[id])
+    .filter((node): node is DesignNode => node !== undefined);
   const primarySelectedId: DesignNodeId | null =
     normalizedSelectedIds.length === 1 ? normalizedSelectedIds[0]! : null;
-  const selectedNode: DesignNode | undefined =
-    primarySelectedId === null ? undefined : currentDoc.nodes[primarySelectedId];
-
-  const streamedRevision = streamedSummary?.revision ?? streamedObject?.revision ?? null;
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the full object payload when opening an object or when its summary revision advances beyond the cached full document
-  useEffect(() => {
-    let cancelled = false;
-    if (
-      streamedObject !== null &&
-      (streamedRevision === null || streamedObject.revision >= streamedRevision)
-    ) {
-      return;
-    }
-    void readT3Object(environmentId, objectId).then(
-      (object) => {
-        if (cancelled) return;
-        setFetchedObject(object);
-        setLoadError(null);
-      },
-      (error: unknown) => {
-        if (cancelled) return;
-        setLoadError(error instanceof Error ? error.message : String(error));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, objectId, streamedObject, streamedRevision]);
-
-  const activeRevision = activeObject?.revision ?? null;
-  const targetRevisionsKey =
-    activeRevision === null ? null : `${environmentId}:${objectId}:${activeRevision}`;
-  const revisionsLoading = targetRevisionsKey !== null && loadedRevisionsKey !== targetRevisionsKey;
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes the revision timeline whenever the object's revision changes
-  useEffect(() => {
-    if (targetRevisionsKey === null) return;
-    let cancelled = false;
-    void listT3ObjectRevisions(environmentId, objectId, 60).then(
-      (list) => {
-        if (cancelled) return;
-        setRevisions(list);
-        setLoadedRevisionsKey(targetRevisionsKey);
-      },
-      () => {
-        if (cancelled) return;
-        setLoadedRevisionsKey(targetRevisionsKey);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, objectId, targetRevisionsKey]);
-
-  const hasMatchingHistoryNav =
-    historyNav !== null &&
-    activeObject !== null &&
-    historyNav.trackedRevision === activeObject.revision;
-  const logicalRevision = hasMatchingHistoryNav
-    ? historyNav.logicalRevision
-    : (activeObject?.revision ?? null);
-  const redoStack = hasMatchingHistoryNav ? historyNav.redoStack : [];
-  const undoTarget =
-    logicalRevision !== null ? findPreviousRevision(revisions, logicalRevision) : null;
-  const redoTarget = redoStack[redoStack.length - 1] ?? null;
-
-  const commitOps = (
-    ops: ReadonlyArray<DesignMutationOp>,
-    summary: string,
-    options?: { readonly selectIds?: ReadonlyArray<DesignNodeId> },
-  ) => {
-    if (activeObject === null) return;
-    const baseRevision = activeObject.revision;
-    const preview = applyDesignMutations(currentDoc, ops);
-    if (preview.ok) {
-      setOptimisticDoc(preview.document);
-      if (options?.selectIds !== undefined) {
-        setSelectedIds(options.selectIds);
-      } else if (preview.createdIds.length > 0) {
-        const lastCreated = preview.createdIds[preview.createdIds.length - 1];
-        setSelectedIds(lastCreated !== undefined ? [lastCreated] : []);
-      }
-    }
-    setActionError(null);
-    void mutateDesignObject(environmentId, {
-      id: objectId,
-      ops,
-      summary,
-      expectedRevision: baseRevision,
-    }).then(
-      (result) => {
-        setFetchedObject(result.object);
-        setOptimisticDoc(null);
-        setHistoryNav(null);
-      },
-      (error: unknown) => {
-        setOptimisticDoc(null);
-        setActionError(error instanceof Error ? error.message : String(error));
-        void readT3Object(environmentId, objectId).then(
-          (latest) => setFetchedObject(latest),
-          () => undefined,
-        );
-      },
-    );
-  };
-
-  const restoreRevision = (
-    targetRevision: number,
-    nextNav: ((newRevision: number) => HistoryNavState | null) | null,
-  ) => {
-    if (activeObject === null) return;
-    setActionError(null);
-    void restoreT3ObjectRevision(environmentId, {
-      id: objectId,
-      revision: targetRevision,
-      expectedRevision: activeObject.revision,
-    }).then(
-      (result) => {
-        setFetchedObject(result.object);
-        setOptimisticDoc(null);
-        setHistoryNav(nextNav ? nextNav(result.object.revision) : null);
-      },
-      (error: unknown) => {
-        setActionError(error instanceof Error ? error.message : String(error));
-      },
-    );
-  };
-
-  const handleUndo = () => {
-    if (undoTarget === null || logicalRevision === null) return;
-    const nextRedo = [...redoStack.slice(-29), logicalRevision];
-    restoreRevision(undoTarget, (newRevision) => ({
-      trackedRevision: newRevision,
-      logicalRevision: undoTarget,
-      redoStack: nextRedo,
-    }));
-  };
-
-  const handleRedo = () => {
-    if (redoTarget === null) return;
-    const nextRedo = redoStack.slice(0, -1);
-    restoreRevision(redoTarget, (newRevision) => ({
-      trackedRevision: newRevision,
-      logicalRevision: redoTarget,
-      redoStack: nextRedo,
-    }));
-  };
 
   const handleAddNode = (node: DesignNodeInput) => {
     commitOps([{ op: "add", node }], `Added ${node.name}`);
@@ -512,8 +308,7 @@ export function DesignObjectWorkspace({
   const handleCopyNodes = (ids: ReadonlyArray<DesignNodeId>): string | null => {
     const payload = serializeDesignClipboard(currentDoc, ids);
     if (payload === null) return null;
-    sharedDesignClipboard = payload;
-    sharedDesignPasteCount = 0;
+    writeSharedDesignClipboard(payload);
     const serialized = JSON.stringify(payload);
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText !== undefined) {
       void navigator.clipboard.writeText(serialized).catch(() => undefined);
@@ -532,7 +327,7 @@ export function DesignObjectWorkspace({
     payload: DesignClipboardPayload,
     pasteAt: Point2D | null = null,
   ): boolean => {
-    const nextPasteCount = pasteAt === null ? sharedDesignPasteCount + 1 : 1;
+    const nextPasteCount = pasteAt === null ? nextSharedDesignPasteCount() : 1;
     const viewportCenter = canvasHandleRef.current?.getViewportCenterWorld();
     const pasted = buildPasteNodesOps(currentDoc, payload, {
       selectedIds: normalizedSelectedIds,
@@ -542,7 +337,7 @@ export function DesignObjectWorkspace({
     });
     if (pasted === null) return false;
     if (pasteAt === null) {
-      sharedDesignPasteCount = nextPasteCount;
+      recordSharedDesignPasteCount(nextPasteCount);
     }
     const summary =
       pasted.pastedRootIds.length === 1
@@ -560,13 +355,14 @@ export function DesignObjectWorkspace({
     if (options?.clipboardText !== undefined && options.clipboardText !== null) {
       const fromText = parseDesignClipboard(options.clipboardText);
       if (fromText !== null) {
-        sharedDesignClipboard = fromText;
+        writeSharedDesignClipboard(fromText, false);
         pastePayload(fromText, pasteAt);
         return;
       }
     }
-    if (sharedDesignClipboard !== null) {
-      pastePayload(sharedDesignClipboard, pasteAt);
+    const cachedClipboard = readSharedDesignClipboard();
+    if (cachedClipboard !== null) {
+      pastePayload(cachedClipboard, pasteAt);
       return;
     }
     if (typeof navigator !== "undefined" && navigator.clipboard?.readText !== undefined) {
@@ -575,8 +371,7 @@ export function DesignObjectWorkspace({
         .then((text) => {
           const parsed = parseDesignClipboard(text);
           if (parsed !== null) {
-            sharedDesignClipboard = parsed;
-            sharedDesignPasteCount = 0;
+            writeSharedDesignClipboard(parsed);
             pastePayload(parsed, pasteAt);
           }
         })
@@ -599,20 +394,32 @@ export function DesignObjectWorkspace({
     commitOps(ops, ops.length === 1 ? `Nudged ${lastName}` : `Nudged ${ops.length} layers`);
   };
 
-  const handleAnnotateNode = (id: DesignNodeId) => {
-    if (threadRef === undefined) return;
-    setPickActive(true);
-    setSelectedIds([id]);
-    setAskChatNote("");
-    const anchor = canvasHandleRef.current?.getNodeAnchorWorld(id) ?? null;
-    if (anchor !== null) {
-      setSelectionAnchorWorld(anchor);
-    } else {
+  const resolveSelectionAnchorWorld = (ids: ReadonlyArray<DesignNodeId>): Point2D | null => {
+    const anchor = canvasHandleRef.current?.getSelectionAnchorWorld(ids) ?? null;
+    if (anchor !== null) return anchor;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const id of ids) {
       const node = currentDoc.nodes[id];
-      setSelectionAnchorWorld(
-        node !== undefined ? { x: node.x + node.width / 2, y: node.y + node.height } : null,
-      );
+      if (node === undefined) continue;
+      minX = Math.min(minX, node.x);
+      maxX = Math.max(maxX, node.x + node.width);
+      maxY = Math.max(maxY, node.y + node.height);
     }
+    return Number.isFinite(minX) && Number.isFinite(maxX) && Number.isFinite(maxY)
+      ? { x: (minX + maxX) / 2, y: maxY }
+      : null;
+  };
+
+  const handleAnnotateNodes = (ids: ReadonlyArray<DesignNodeId>) => {
+    if (threadRef === undefined) return;
+    const validIds = normalizeSelectedNodeIds(currentDoc, ids);
+    if (validIds.length === 0) return;
+    setPickActive(true);
+    setSelectedIds(validIds);
+    setAskChatNote("");
+    setSelectionAnchorWorld(resolveSelectionAnchorWorld(validIds));
   };
 
   const handleCanvasContextMenu = (request: DesignCanvasContextMenuRequest) => {
@@ -731,6 +538,8 @@ export function DesignObjectWorkspace({
   const togglePickMode = () => {
     if (pickActive) {
       cancelPickMode();
+    } else if (normalizedSelectedIds.length > 0) {
+      handleAnnotateNodes(normalizedSelectedIds);
     } else {
       setPickActive(true);
       setSelectedIds([]);
@@ -751,32 +560,25 @@ export function DesignObjectWorkspace({
     const nextIds = normalizeSelectedNodeIds(currentDoc, ids);
     setSelectedIds(nextIds);
     setAskChatNote("");
-    const singleId = nextIds.length === 1 ? nextIds[0]! : null;
-    if (singleId === null || !pickActive) {
+    if (nextIds.length === 0 || !pickActive) {
       setSelectionAnchorWorld(null);
       return;
     }
-    const anchor = canvasHandleRef.current?.getNodeAnchorWorld(singleId) ?? null;
-    if (anchor !== null) {
-      setSelectionAnchorWorld(anchor);
-    } else {
-      const node = currentDoc.nodes[singleId];
-      setSelectionAnchorWorld(
-        node !== undefined ? { x: node.x + node.width / 2, y: node.y + node.height } : null,
-      );
-    }
+    setSelectionAnchorWorld(resolveSelectionAnchorWorld(nextIds));
   };
 
-  const submitElementToChat = (mode: "attach" | "send") => {
-    if (threadRef === undefined || activeObject === null || selectedNode === undefined) return;
+  const submitElementsToChat = (mode: "attach" | "send") => {
+    if (threadRef === undefined || activeObject === null || selectedNodes.length === 0) return;
     const note = askChatNote.trim();
     const comment =
       note.length > 0
         ? note
-        : gt("Adjust this design element in the T3 Object using design_mutate.");
-    const annotation = buildDesignElementAnnotation({
+        : selectedNodes.length === 1
+          ? gt("Adjust this design element in the T3 Object using design_mutate.")
+          : gt("Adjust these selected design elements in the T3 Object using design_mutate.");
+    const annotation = buildDesignElementsAnnotation({
       object: activeObject,
-      node: selectedNode,
+      nodes: selectedNodes,
       comment,
     });
     useComposerDraftStore.getState().addPreviewAnnotation(threadRef, annotation);
@@ -837,13 +639,14 @@ export function DesignObjectWorkspace({
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        if (!canMutate) return;
         event.preventDefault();
         if (event.shiftKey) handleRedo();
         else handleUndo();
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") {
-        if (normalizedSelectedIds.length > 0 && !pickActive) {
+        if (canMutate && normalizedSelectedIds.length > 0 && !pickActive) {
           event.preventDefault();
           handleDuplicateNodes(normalizedSelectedIds);
         }
@@ -858,7 +661,7 @@ export function DesignObjectWorkspace({
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "F2") {
-        if (primarySelectedId !== null && !pickActive) {
+        if (canMutate && primarySelectedId !== null && !pickActive) {
           event.preventDefault();
           canvasHandleRef.current?.startRename(primarySelectedId);
         }
@@ -892,47 +695,47 @@ export function DesignObjectWorkspace({
           setTool("hand");
           break;
         case "f":
-          setTool("frame");
+          if (canMutate) setTool("frame");
           break;
         case "r":
-          setTool("rect");
+          if (canMutate) setTool("rect");
           break;
         case "o":
-          setTool("ellipse");
+          if (canMutate) setTool("ellipse");
           break;
         case "t":
-          setTool("text");
+          if (canMutate) setTool("text");
           break;
         case "l":
-          setTool("line");
+          if (canMutate) setTool("line");
           break;
         case "arrowup":
-          if (normalizedSelectedIds.length > 0) {
+          if (canMutate && normalizedSelectedIds.length > 0) {
             event.preventDefault();
             handleNudgeNodes(0, -step);
           }
           break;
         case "arrowdown":
-          if (normalizedSelectedIds.length > 0) {
+          if (canMutate && normalizedSelectedIds.length > 0) {
             event.preventDefault();
             handleNudgeNodes(0, step);
           }
           break;
         case "arrowleft":
-          if (normalizedSelectedIds.length > 0) {
+          if (canMutate && normalizedSelectedIds.length > 0) {
             event.preventDefault();
             handleNudgeNodes(-step, 0);
           }
           break;
         case "arrowright":
-          if (normalizedSelectedIds.length > 0) {
+          if (canMutate && normalizedSelectedIds.length > 0) {
             event.preventDefault();
             handleNudgeNodes(step, 0);
           }
           break;
         case "backspace":
         case "delete":
-          if (normalizedSelectedIds.length > 0) {
+          if (canMutate && normalizedSelectedIds.length > 0) {
             event.preventDefault();
             handleDeleteNodes(normalizedSelectedIds);
           }
@@ -949,7 +752,9 @@ export function DesignObjectWorkspace({
       }
     };
     const onCut = (event: ClipboardEvent) => {
-      if (isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) return;
+      if (!canMutate || isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) {
+        return;
+      }
       if (normalizedSelectedIds.length === 0) return;
       const serialized = handleCutNodes(normalizedSelectedIds);
       if (serialized !== null) {
@@ -958,10 +763,12 @@ export function DesignObjectWorkspace({
       }
     };
     const onPaste = (event: ClipboardEvent) => {
-      if (isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) return;
+      if (!canMutate || isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) {
+        return;
+      }
       const clipboardText = event.clipboardData?.getData("text/plain") ?? "";
       const parsed = parseDesignClipboard(clipboardText);
-      if (parsed !== null || sharedDesignClipboard !== null) {
+      if (parsed !== null || readSharedDesignClipboard() !== null) {
         event.preventDefault();
         handlePaste({ clipboardText });
       }
@@ -1036,40 +843,37 @@ export function DesignObjectWorkspace({
 
   const commitTitle = () => {
     setEditingTitle(false);
-    const trimmed = titleDraft.trim();
-    if (trimmed.length > 0 && trimmed !== activeObject.title) {
-      void renameT3Object(environmentId, objectId, trimmed).then(
-        (result) => setFetchedObject(result.object),
-        () => undefined,
-      );
-    }
+    renameTitle(titleDraft);
   };
 
-  const titleControl = editingTitle ? (
-    <Input
-      autoFocus
-      size="sm"
-      className="w-44"
-      value={titleDraft}
-      onChange={(event) => setTitleDraft(event.target.value)}
-      onBlur={commitTitle}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") commitTitle();
-        if (event.key === "Escape") setEditingTitle(false);
-      }}
-    />
-  ) : (
-    <button
-      type="button"
-      className="min-w-0 truncate rounded px-1 py-0.5 text-sm font-medium text-foreground hover:bg-accent/60"
-      onClick={() => {
-        setTitleDraft(activeObject.title);
-        setEditingTitle(true);
-      }}
-    >
-      {activeObject.title}
-    </button>
-  );
+  const titleControl =
+    editingTitle && canMutate ? (
+      <Input
+        autoFocus
+        size="sm"
+        className="w-44"
+        value={titleDraft}
+        onChange={(event) => setTitleDraft(event.target.value)}
+        onBlur={commitTitle}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") commitTitle();
+          if (event.key === "Escape") setEditingTitle(false);
+        }}
+      />
+    ) : (
+      <button
+        type="button"
+        disabled={!canMutate}
+        className="min-w-0 truncate rounded px-1 py-0.5 text-sm font-medium text-foreground hover:bg-accent/60 disabled:cursor-default disabled:hover:bg-transparent"
+        onClick={() => {
+          if (!canMutate) return;
+          setTitleDraft(activeObject.title);
+          setEditingTitle(true);
+        }}
+      >
+        {activeObject.title}
+      </button>
+    );
 
   const headerActions = (
     <div className="flex shrink-0 items-center gap-0.5 [-webkit-app-region:no-drag]">
@@ -1101,7 +905,7 @@ export function DesignObjectWorkspace({
               size="icon-xs"
               variant="ghost"
               aria-label={gt("Undo")}
-              disabled={undoTarget === null}
+              disabled={!canUndo}
               onClick={handleUndo}
             />
           }
@@ -1113,7 +917,7 @@ export function DesignObjectWorkspace({
         </TooltipPopup>
       </Tooltip>
 
-      {redoTarget !== null ? (
+      {canRedo ? (
         <Tooltip>
           <TooltipTrigger
             render={
@@ -1249,10 +1053,14 @@ export function DesignObjectWorkspace({
   );
 
   const selectionOverlay =
-    threadRef !== undefined && pickActive && selectedNode !== undefined ? (
+    threadRef !== undefined && pickActive && selectedNodes.length > 0 ? (
       <div className="dropdown-glass flex items-center gap-2 rounded-xl border border-border p-2 text-popover-foreground shadow-2xl">
-        <span className="max-w-24 shrink-0 truncate rounded-md bg-muted px-1.5 py-1 text-2xs font-medium text-muted-foreground">
-          {selectedNode.name}
+        <span className="max-w-28 shrink-0 truncate rounded-md bg-muted px-1.5 py-1 text-2xs font-medium text-muted-foreground">
+          {selectedNodes.length === 1
+            ? selectedNodes[0]!.name
+            : gt("{count, plural, one {{count} layer} other {{count} layers}}", {
+                count: selectedNodes.length,
+              })}
         </span>
 
         <input
@@ -1266,7 +1074,7 @@ export function DesignObjectWorkspace({
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               const shouldSend = (event.metaKey || event.ctrlKey) && onSendAnnotation !== undefined;
-              submitElementToChat(shouldSend ? "send" : "attach");
+              submitElementsToChat(shouldSend ? "send" : "attach");
             }
             if (event.key === "Escape") {
               event.preventDefault();
@@ -1278,7 +1086,7 @@ export function DesignObjectWorkspace({
         <Tooltip>
           <TooltipTrigger
             render={
-              <Button size="sm" onClick={() => submitElementToChat("attach")}>
+              <Button size="sm" onClick={() => submitElementsToChat("attach")}>
                 <T>Attach</T>
               </Button>
             }
@@ -1293,20 +1101,22 @@ export function DesignObjectWorkspace({
     ) : null;
 
   const bottomOverlay = (
-    <>
-      <div
-        className="dropdown-glass pointer-events-auto absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-xl border border-border/70 p-1 shadow-lg"
-        onPointerDown={(event) => event.stopPropagation()}
-        onWheel={(event) => event.stopPropagation()}
-        onContextMenu={(event) => event.stopPropagation()}
-      >
-        {tools.map((item) => (
+    <div
+      className="dropdown-glass pointer-events-auto absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-xl border border-border/70 p-1 shadow-lg"
+      onPointerDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.stopPropagation()}
+    >
+      {tools.map((item) => {
+        const isDraw = item.id !== "select" && item.id !== "hand";
+        return (
           <Tooltip key={item.id}>
             <TooltipTrigger
               render={
                 <Button
                   size="icon-xs"
                   variant={!pickActive && tool === item.id ? "secondary" : "ghost"}
+                  disabled={isDraw && !canMutate}
                   aria-label={item.label}
                   onClick={() => {
                     if (pickActive) cancelPickMode();
@@ -1319,61 +1129,9 @@ export function DesignObjectWorkspace({
             </TooltipTrigger>
             <TooltipPopup>{item.label}</TooltipPopup>
           </Tooltip>
-        ))}
-      </div>
-
-      {viewportSize.width >= 460 ? (
-        <div
-          className="dropdown-glass pointer-events-auto absolute right-3 bottom-3 z-30 flex items-center gap-0.5 rounded-lg border border-border/70 p-0.5 shadow-md"
-          onPointerDown={(event) => event.stopPropagation()}
-          onWheel={(event) => event.stopPropagation()}
-          onContextMenu={(event) => event.stopPropagation()}
-        >
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label={gt("Zoom out")}
-                  onClick={() => canvasHandleRef.current?.zoomOut()}
-                />
-              }
-            >
-              <ZoomOutIcon className="size-3.5" />
-            </TooltipTrigger>
-            <TooltipPopup>
-              <T>Zoom out</T>
-            </TooltipPopup>
-          </Tooltip>
-          <button
-            type="button"
-            className="min-w-10 rounded px-1 py-0.5 text-2xs tabular-nums text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-            aria-label={gt("Fit to canvas (0)")}
-            onClick={handleFitView}
-          >
-            {Math.round(viewport.zoom * 100)}%
-          </button>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label={gt("Zoom in")}
-                  onClick={() => canvasHandleRef.current?.zoomIn()}
-                />
-              }
-            >
-              <ZoomInIcon className="size-3.5" />
-            </TooltipTrigger>
-            <TooltipPopup>
-              <T>Zoom in</T>
-            </TooltipPopup>
-          </Tooltip>
-        </div>
-      ) : null}
-    </>
+        );
+      })}
+    </div>
   );
 
   return (
@@ -1493,13 +1251,12 @@ export function DesignObjectWorkspace({
           tool={tool}
           selectedIds={normalizedSelectedIds}
           pickActive={pickActive}
+          readOnly={!canMutate}
           selectionAnchorWorld={selectionAnchorWorld}
           selectionOverlay={selectionOverlay}
           bottomOverlay={bottomOverlay}
           spacePressed={spacePressed}
           handleRef={canvasHandleRef}
-          onViewportChange={setViewport}
-          onViewportSizeChange={setViewportSize}
           onSelectIds={setSelectedIds}
           onPickNode={handlePickNode}
           onAddNode={handleAddNode}
@@ -1537,526 +1294,46 @@ export function DesignObjectWorkspace({
               }
               onDetachFromParent={handleDetachFromInspector}
               onExportNodes={handleExportNodes}
+              onAnnotateNodes={threadRef !== undefined ? handleAnnotateNodes : undefined}
             />
           </>
         ) : null}
       </div>
 
-      {(() => {
-        if (contextMenu === null) return null;
-        const anchor = {
-          getBoundingClientRect: () => new DOMRect(contextMenu.x, contextMenu.y, 0, 0),
-        };
-        const isMac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform);
-
-        if (contextMenu.kind === "node") {
-          const menuNode = currentDoc.nodes[contextMenu.nodeId];
-          if (menuNode === undefined) return null;
-          const menuNodeIds = normalizeSelectedNodeIds(currentDoc, contextMenu.nodeIds);
-          const targetIds = menuNodeIds.length > 0 ? menuNodeIds : [menuNode.id];
-          const isSingleTarget = targetIds.length === 1;
-          const parent =
-            menuNode.parentId === null ? undefined : currentDoc.nodes[menuNode.parentId];
-          const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
-          const order = getLayerOrderAvailability(currentDoc, menuNode.id);
-          const targetNodes = targetIds
-            .map((id) => currentDoc.nodes[id])
-            .filter((item): item is DesignNode => item !== undefined);
-          const allHidden = targetNodes.every((item) => item.visible === false);
-          const allLocked = targetNodes.every((item) => item.locked === true);
-
-          return (
-            <Menu
-              key={`${contextMenu.kind}:${contextMenu.x}:${contextMenu.y}`}
-              open
-              onOpenChange={(open) => {
-                if (!open) setContextMenu(null);
-              }}
-            >
-              <MenuPopup
-                anchor={anchor}
-                align="start"
-                side="bottom"
-                sideOffset={0}
-                finalFocus={false}
-                onContextMenu={(event) => event.preventDefault()}
-              >
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleCopyNodes(targetIds);
-                  }}
-                >
-                  <CopyIcon className="size-3.5" />
-                  <span>
-                    <T>Copy</T>
-                  </span>
-                  <MenuShortcut>{isMac ? "⌘C" : "Ctrl+C"}</MenuShortcut>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleCutNodes(targetIds);
-                  }}
-                >
-                  <ScissorsIcon className="size-3.5" />
-                  <span>
-                    <T>Cut</T>
-                  </span>
-                  <MenuShortcut>{isMac ? "⌘X" : "Ctrl+X"}</MenuShortcut>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    handlePaste();
-                  }}
-                >
-                  <ClipboardPasteIcon className="size-3.5" />
-                  <span>
-                    <T>Paste</T>
-                  </span>
-                  <MenuShortcut>{isMac ? "⌘V" : "Ctrl+V"}</MenuShortcut>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleDuplicateNodes(targetIds);
-                  }}
-                >
-                  <CopyPlusIcon className="size-3.5" />
-                  <span>
-                    <T>Duplicate</T>
-                  </span>
-                  <MenuShortcut>{isMac ? "⌘D" : "Ctrl+D"}</MenuShortcut>
-                </MenuItem>
-                {isSingleTarget ? (
-                  <MenuItem
-                    onClick={() => {
-                      const target = contextMenu.renameTarget;
-                      setContextMenu(null);
-                      if (target === "layers") {
-                        setRenamingLayerId(menuNode.id);
-                      } else {
-                        canvasHandleRef.current?.startRename(menuNode.id);
-                      }
-                    }}
-                  >
-                    <PencilIcon className="size-3.5" />
-                    <span>
-                      <T>Rename</T>
-                    </span>
-                    <MenuShortcut>F2</MenuShortcut>
-                  </MenuItem>
-                ) : null}
-
-                <MenuSeparator />
-
-                <MenuSub>
-                  <MenuSubTrigger>
-                    <DownloadIcon className="size-3.5" />
-                    <span>
-                      {isSingleTarget ? (
-                        <T>Download</T>
-                      ) : (
-                        <T>
-                          Download (<Var>{targetIds.length}</Var>)
-                        </T>
-                      )}
-                    </span>
-                  </MenuSubTrigger>
-                  <MenuSubPopup>
-                    <MenuItem
-                      onClick={() => {
-                        setContextMenu(null);
-                        handleExportNodes(targetIds, "png");
-                      }}
-                    >
-                      <ImageIcon className="size-3.5" />
-                      <span>
-                        <T>Download PNG (2x)</T>
-                      </span>
-                    </MenuItem>
-                    <MenuItem
-                      onClick={() => {
-                        setContextMenu(null);
-                        handleExportNodes(targetIds, "svg");
-                      }}
-                    >
-                      <ShapesIcon className="size-3.5" />
-                      <span>
-                        <T>Download SVG (Figma)</T>
-                      </span>
-                    </MenuItem>
-                    <MenuItem
-                      onClick={() => {
-                        setContextMenu(null);
-                        handleExportNodes(targetIds, "html");
-                      }}
-                    >
-                      <FileCodeIcon className="size-3.5" />
-                      <span>
-                        <T>Download HTML</T>
-                      </span>
-                    </MenuItem>
-                  </MenuSubPopup>
-                </MenuSub>
-
-                {isSingleTarget ? (
-                  <>
-                    <MenuSeparator />
-
-                    <MenuSub>
-                      <MenuSubTrigger disabled={!order.canBringForward && !order.canSendBackward}>
-                        <LayersIcon className="size-3.5" />
-                        <span>
-                          <T>Arrange</T>
-                        </span>
-                      </MenuSubTrigger>
-                      <MenuSubPopup>
-                        <MenuItem
-                          disabled={!order.canBringForward}
-                          onClick={() => {
-                            setContextMenu(null);
-                            handleReorderNode(menuNode.id, "front");
-                          }}
-                        >
-                          <ArrowUpToLineIcon className="size-3.5" />
-                          <span>
-                            <T>Bring to front</T>
-                          </span>
-                        </MenuItem>
-                        <MenuItem
-                          disabled={!order.canBringForward}
-                          onClick={() => {
-                            setContextMenu(null);
-                            handleReorderNode(menuNode.id, "forward");
-                          }}
-                        >
-                          <ArrowUpIcon className="size-3.5" />
-                          <span>
-                            <T>Bring forward</T>
-                          </span>
-                        </MenuItem>
-                        <MenuItem
-                          disabled={!order.canSendBackward}
-                          onClick={() => {
-                            setContextMenu(null);
-                            handleReorderNode(menuNode.id, "backward");
-                          }}
-                        >
-                          <ArrowDownIcon className="size-3.5" />
-                          <span>
-                            <T>Send backward</T>
-                          </span>
-                        </MenuItem>
-                        <MenuItem
-                          disabled={!order.canSendBackward}
-                          onClick={() => {
-                            setContextMenu(null);
-                            handleReorderNode(menuNode.id, "back");
-                          }}
-                        >
-                          <ArrowDownToLineIcon className="size-3.5" />
-                          <span>
-                            <T>Send to back</T>
-                          </span>
-                        </MenuItem>
-                      </MenuSubPopup>
-                    </MenuSub>
-
-                    {inAutoLayoutParent ? (
-                      <MenuItem
-                        onClick={() => {
-                          setContextMenu(null);
-                          handleDetachFromInspector(menuNode);
-                        }}
-                      >
-                        <Unlink2Icon className="size-3.5" />
-                        <span>
-                          <T>Detach from Auto Layout</T>
-                        </span>
-                      </MenuItem>
-                    ) : null}
-                  </>
-                ) : null}
-
-                <MenuSeparator />
-
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    const nextVisible = allHidden;
-                    commitOps(
-                      targetIds.map((id) => ({
-                        op: "update",
-                        id,
-                        patch: { visible: nextVisible },
-                      })),
-                      isSingleTarget
-                        ? `${nextVisible ? "Shown" : "Hidden"} ${menuNode.name}`
-                        : `${nextVisible ? "Shown" : "Hidden"} ${targetIds.length} layers`,
-                    );
-                  }}
-                >
-                  {allHidden ? (
-                    <EyeIcon className="size-3.5" />
-                  ) : (
-                    <EyeOffIcon className="size-3.5" />
-                  )}
-                  <span>{allHidden ? <T>Show</T> : <T>Hide</T>}</span>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    const nextLocked = !allLocked;
-                    commitOps(
-                      targetIds.map((id) => ({
-                        op: "update",
-                        id,
-                        patch: { locked: nextLocked },
-                      })),
-                      isSingleTarget
-                        ? `${nextLocked ? "Locked" : "Unlocked"} ${menuNode.name}`
-                        : `${nextLocked ? "Locked" : "Unlocked"} ${targetIds.length} layers`,
-                    );
-                  }}
-                >
-                  {allLocked ? (
-                    <UnlockIcon className="size-3.5" />
-                  ) : (
-                    <LockIcon className="size-3.5" />
-                  )}
-                  <span>{allLocked ? <T>Unlock</T> : <T>Lock</T>}</span>
-                </MenuItem>
-
-                {isSingleTarget && threadRef !== undefined ? (
-                  <>
-                    <MenuSeparator />
-                    <MenuItem
-                      onClick={() => {
-                        setContextMenu(null);
-                        handleAnnotateNode(menuNode.id);
-                      }}
-                    >
-                      <MessageSquarePlusIcon className="size-3.5" />
-                      <span>
-                        <T>Annotate for chat</T>
-                      </span>
-                    </MenuItem>
-                  </>
-                ) : null}
-
-                <MenuSeparator />
-
-                <MenuItem
-                  variant="destructive"
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleDeleteNodes(targetIds);
-                  }}
-                >
-                  <Trash2Icon className="size-3.5" />
-                  <span>
-                    {isSingleTarget ? (
-                      <T>Delete</T>
-                    ) : (
-                      <T>
-                        Delete (<Var>{targetIds.length}</Var>)
-                      </T>
-                    )}
-                  </span>
-                  <MenuShortcut>{isMac ? "⌫" : gt("Del")}</MenuShortcut>
-                </MenuItem>
-              </MenuPopup>
-            </Menu>
-          );
-        }
-
-        const originX = Math.round(contextMenu.worldX);
-        const originY = Math.round(contextMenu.worldY);
-
-        return (
-          <Menu
-            key={`${contextMenu.kind}:${contextMenu.x}:${contextMenu.y}`}
-            open
-            onOpenChange={(open) => {
-              if (!open) setContextMenu(null);
-            }}
-          >
-            <MenuPopup
-              anchor={anchor}
-              align="start"
-              side="bottom"
-              sideOffset={0}
-              finalFocus={false}
-              onContextMenu={(event) => event.preventDefault()}
-            >
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  handlePaste({ pasteAt: { x: originX, y: originY } });
-                }}
-              >
-                <ClipboardPasteIcon className="size-3.5" />
-                <span>
-                  <T>Paste here</T>
-                </span>
-                <MenuShortcut>{isMac ? "⌘V" : "Ctrl+V"}</MenuShortcut>
-              </MenuItem>
-              <MenuItem
-                disabled={currentDoc.rootIds.length === 0}
-                onClick={() => {
-                  setContextMenu(null);
-                  setSelectedIds(getSelectAllNodeIds(currentDoc, normalizedSelectedIds));
-                }}
-              >
-                <MousePointer2Icon className="size-3.5" />
-                <span>
-                  <T>Select all</T>
-                </span>
-                <MenuShortcut>{isMac ? "⌘A" : "Ctrl+A"}</MenuShortcut>
-              </MenuItem>
-
-              <MenuSeparator />
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  handleAddNode(
-                    makeNodeInputForTool(
-                      "frame",
-                      { x: originX, y: originY, width: 360, height: 240 },
-                      null,
-                    ),
-                  );
-                }}
-              >
-                <FrameIcon className="size-3.5" />
-                <span>
-                  <T>Add Frame</T>
-                </span>
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  handleAddNode(
-                    makeNodeInputForTool(
-                      "rect",
-                      { x: originX, y: originY, width: 140, height: 96 },
-                      null,
-                    ),
-                  );
-                }}
-              >
-                <SquareIcon className="size-3.5" />
-                <span>
-                  <T>Add Rectangle</T>
-                </span>
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  handleAddNode(
-                    makeNodeInputForTool(
-                      "ellipse",
-                      { x: originX, y: originY, width: 120, height: 120 },
-                      null,
-                    ),
-                  );
-                }}
-              >
-                <CircleIcon className="size-3.5" />
-                <span>
-                  <T>Add Ellipse</T>
-                </span>
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  handleAddNode(
-                    makeNodeInputForTool(
-                      "text",
-                      { x: originX, y: originY, width: 200, height: 40 },
-                      null,
-                    ),
-                  );
-                }}
-              >
-                <TypeIcon className="size-3.5" />
-                <span>
-                  <T>Add Text</T>
-                </span>
-              </MenuItem>
-
-              <MenuSeparator />
-
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  handleFitView();
-                }}
-              >
-                <Maximize2Icon className="size-3.5" />
-                <span>
-                  <T>Zoom to fit</T>
-                </span>
-                <MenuShortcut>0</MenuShortcut>
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  canvasHandleRef.current?.zoomIn();
-                }}
-              >
-                <ZoomInIcon className="size-3.5" />
-                <span>
-                  <T>Zoom in</T>
-                </span>
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setContextMenu(null);
-                  canvasHandleRef.current?.zoomOut();
-                }}
-              >
-                <ZoomOutIcon className="size-3.5" />
-                <span>
-                  <T>Zoom out</T>
-                </span>
-              </MenuItem>
-
-              <MenuSeparator />
-
-              <MenuItem
-                disabled={undoTarget === null}
-                onClick={() => {
-                  setContextMenu(null);
-                  handleUndo();
-                }}
-              >
-                <Undo2Icon className="size-3.5" />
-                <span>
-                  <T>Undo</T>
-                </span>
-                <MenuShortcut>{isMac ? "⌘Z" : "Ctrl+Z"}</MenuShortcut>
-              </MenuItem>
-              {redoTarget !== null ? (
-                <MenuItem
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleRedo();
-                  }}
-                >
-                  <Redo2Icon className="size-3.5" />
-                  <span>
-                    <T>Redo</T>
-                  </span>
-                  <MenuShortcut>{isMac ? "⇧⌘Z" : "Ctrl+Shift+Z"}</MenuShortcut>
-                </MenuItem>
-              ) : null}
-            </MenuPopup>
-          </Menu>
-        );
-      })()}
+      <DesignContextMenu
+        contextMenu={contextMenu}
+        doc={currentDoc}
+        selectedIds={normalizedSelectedIds}
+        canMutate={canMutate}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        canAnnotate={threadRef !== undefined}
+        onClose={() => setContextMenu(null)}
+        onCopyNodes={handleCopyNodes}
+        onCutNodes={handleCutNodes}
+        onPaste={handlePaste}
+        onDuplicateNodes={handleDuplicateNodes}
+        onStartRename={(id, target) => {
+          if (target === "layers") {
+            setRenamingLayerId(id);
+          } else {
+            canvasHandleRef.current?.startRename(id);
+          }
+        }}
+        onExportNodes={handleExportNodes}
+        onReorderNode={handleReorderNode}
+        onDetachNode={handleDetachFromInspector}
+        onCommitOps={commitOps}
+        onAnnotateNodes={handleAnnotateNodes}
+        onDeleteNodes={handleDeleteNodes}
+        onSelectIds={setSelectedIds}
+        onAddNode={handleAddNode}
+        onFitView={handleFitView}
+        onZoomIn={() => canvasHandleRef.current?.zoomIn()}
+        onZoomOut={() => canvasHandleRef.current?.zoomOut()}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+      />
     </div>
   );
 }

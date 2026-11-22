@@ -194,6 +194,84 @@ describe("T3ObjectService", () => {
         events.map((event) => event.type),
         ["snapshot", "created", "updated", "openRequested"],
       );
+      const createdEvent = events[1];
+      const updatedEvent = events[2];
+      assert.isTrue(createdEvent?.type === "created" && !("content" in createdEvent.object));
+      assert.isTrue(
+        updatedEvent?.type === "updated" &&
+          !("content" in updatedEvent.object) &&
+          updatedEvent.object.revision === 2,
+      );
+    }).pipe(Effect.provide(makeTestLayer())),
+  );
+
+  it.effect("applies initial create ops atomically and leaves no orphan on invalid ops", () =>
+    Effect.gen(function* () {
+      const objects = yield* T3ObjectService.T3ObjectService;
+
+      const failed = yield* Effect.exit(
+        objects.create({
+          kind: "design",
+          title: "Broken Initial Ops",
+          actor: "agent",
+          ops: [
+            {
+              op: "add",
+              node: {
+                id: DesignNodeId.make("child"),
+                type: "rect",
+                name: "Orphan Child",
+                parentId: DesignNodeId.make("missing-parent"),
+                width: 100,
+                height: 100,
+              },
+            },
+          ],
+        }),
+      );
+      assert.isTrue(Exit.isFailure(failed));
+      const failedReason = Exit.isFailure(failed) ? failed.cause.reasons[0] : undefined;
+      assert.isTrue(
+        failedReason?._tag === "Fail" &&
+          isT3ObjectError(failedReason.error) &&
+          failedReason.error.code === "invalid_request",
+      );
+      const listAfterFailure = yield* objects.list({ includeArchived: true });
+      assert.strictEqual(listAfterFailure.objects.length, 0);
+
+      const created = yield* objects.create({
+        kind: "design",
+        title: "Atomic Initial Ops",
+        actor: "agent",
+        ops: [
+          {
+            op: "add",
+            node: {
+              id: DesignNodeId.make("frame-1"),
+              type: "frame",
+              name: "Card",
+              width: 320,
+              height: 200,
+            },
+          },
+          {
+            op: "add",
+            node: {
+              id: DesignNodeId.make("title-1"),
+              type: "text",
+              name: "Title",
+              parentId: DesignNodeId.make("frame-1"),
+              width: 280,
+              height: 32,
+              text: "Atomic",
+            },
+          },
+        ],
+      });
+      assert.strictEqual(created.object.revision, 1);
+      assert.strictEqual(created.object.nodeCount, 2);
+      const history = yield* objects.listRevisions({ id: created.object.id });
+      assert.strictEqual(history.revisions.length, 1);
     }).pipe(Effect.provide(makeTestLayer())),
   );
 });

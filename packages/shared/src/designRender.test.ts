@@ -6,6 +6,7 @@ import {
   inspectDesignDocument,
   renderDesignToHtml,
   renderDesignToSvg,
+  sanitizeDesignImageSrc,
   sanitizeDesignSvg,
 } from "./designRender.ts";
 
@@ -79,13 +80,23 @@ describe("designRender", () => {
     expect(exportedSvg.svg).not.toContain("<script>");
   });
 
-  it("sanitizes svg event handlers and foreignObject", () => {
+  it("sanitizes svg event handlers, foreignObject, embedded tags, and unsafe href/image sources", () => {
     const cleaned = sanitizeDesignSvg(
-      '<svg onload="x()"><foreignObject><div>hi</div></foreignObject><path d="M0 0"/></svg>',
+      '<svg onload="x()"><foreignObject><div>hi</div></foreignObject><iframe src="https://evil.test"></iframe><use xlink:href="javascript:alert(1)"/><use href="data:text/html,<script>1</script>"/><path d="M0 0"/></svg>',
     );
     expect(cleaned).not.toContain("onload=");
     expect(cleaned).not.toContain("foreignObject");
+    expect(cleaned).not.toContain("iframe");
+    expect(cleaned).not.toContain("javascript:");
+    expect(cleaned).not.toContain("data:text/html");
     expect(cleaned).toContain('<path d="M0 0"/>');
+
+    expect(sanitizeDesignImageSrc("https://example.com/a.png")).toBe("https://example.com/a.png");
+    expect(sanitizeDesignImageSrc("/api/assets/logo.png")).toBe("/api/assets/logo.png");
+    expect(sanitizeDesignImageSrc("data:image/png;base64,AAAA")).toBe("data:image/png;base64,AAAA");
+    expect(sanitizeDesignImageSrc("javascript:alert(1)")).toBeNull();
+    expect(sanitizeDesignImageSrc("file:///etc/passwd")).toBeNull();
+    expect(sanitizeDesignImageSrc("data:text/html;base64,AAAA")).toBeNull();
   });
 
   it("exports individual nested components and multi-node selections with transparent backgrounds", () => {

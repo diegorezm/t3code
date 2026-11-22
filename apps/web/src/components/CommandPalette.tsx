@@ -76,6 +76,7 @@ import {
   PaletteIcon,
   RotateCcwIcon,
   SettingsIcon,
+  ShapesIcon,
   MonitorIcon,
   PinIcon,
   PinOffIcon,
@@ -1720,6 +1721,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:objects",
+    searchTerms: ["objects", "design", "canvas", "figma", "ui", "mockup"],
+    title: gt("Open objects"),
+    icon: <ShapesIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/objects", search: {} });
+    },
+  });
 
   actionItems.push({
     kind: "action",

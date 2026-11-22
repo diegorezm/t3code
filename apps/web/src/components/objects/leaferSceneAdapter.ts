@@ -6,7 +6,7 @@ import type {
   DesignNodePatch,
   DesignShadow,
 } from "@t3tools/contracts";
-import { sanitizeDesignSvg } from "@t3tools/shared/designRender";
+import { sanitizeDesignImageSrc, sanitizeDesignSvg } from "@t3tools/shared/designRender";
 import type {
   IAlign,
   IFill,
@@ -309,19 +309,100 @@ export function designNodeToLeaferInput(
       };
     }
 
-    case "image":
+    case "image": {
+      const safeSrc = sanitizeDesignImageSrc(node.src);
+      if (safeSrc === null) {
+        return {
+          ...base,
+          tag: "Rect",
+          fill: base.fill ?? "#27272a",
+        };
+      }
       return {
         ...base,
         tag: "Image",
-        url: node.src,
+        url: safeSrc,
         fill: {
           type: "image",
-          url: node.src,
+          url: safeSrc,
           mode:
             node.objectFit === "contain" ? "fit" : node.objectFit === "fill" ? "stretch" : "cover",
         },
       };
+    }
   }
+}
+
+function sameStringArray(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+export function canPatchLeaferSceneInPlace(
+  prevDoc: DesignDocument,
+  nextDoc: DesignDocument,
+): boolean {
+  if (!sameStringArray(prevDoc.rootIds, nextDoc.rootIds)) return false;
+  const prevKeys = Object.keys(prevDoc.nodes);
+  const nextKeys = Object.keys(nextDoc.nodes);
+  if (prevKeys.length !== nextKeys.length) return false;
+
+  for (const id of nextKeys) {
+    const prev = prevDoc.nodes[id];
+    const next = nextDoc.nodes[id];
+    if (prev === undefined || next === undefined) return false;
+    if (prev === next) continue;
+    if (prev.type !== next.type || prev.parentId !== next.parentId) return false;
+    if (prev.widthMode !== next.widthMode || prev.heightMode !== next.heightMode) return false;
+
+    if (prev.type === "frame" && next.type === "frame") {
+      if (!sameStringArray(prev.childIds, next.childIds)) return false;
+      if (prev.layout !== next.layout) return false;
+      if (prev.parentId === null && (prev.visible !== false) !== (next.visible !== false)) {
+        return false;
+      }
+    }
+    if (prev.type === "image" && next.type === "image") {
+      const prevSafe = sanitizeDesignImageSrc(prev.src);
+      const nextSafe = sanitizeDesignImageSrc(next.src);
+      if ((prevSafe === null) !== (nextSafe === null)) return false;
+    }
+  }
+  return true;
+}
+
+export function buildLeaferNodePatchInput(
+  doc: DesignDocument,
+  nodeId: DesignNodeId,
+  inAutoLayoutParent: boolean,
+): IUIInputData | null {
+  const node = doc.nodes[nodeId];
+  if (node === undefined) return null;
+  const full = designNodeToLeaferInput(doc, nodeId, inAutoLayoutParent);
+  if (full === null) return null;
+
+  const { tag: _tag, children: _children, ...rest } = full;
+  const patch: IUIInputData = {
+    ...rest,
+    rotation: node.rotation ?? 0,
+    shadow: node.shadow !== undefined ? mapShadow(node.shadow) : [],
+  };
+
+  if (node.type !== "line") {
+    if (node.type !== "text" && node.type !== "image" && node.type !== "svg") {
+      patch.fill = mapFill(node.fill) ?? "";
+    }
+    patch.stroke = node.stroke ?? "";
+    patch.strokeWidth = node.stroke !== undefined ? (node.strokeWidth ?? 1) : 0;
+    patch.cornerRadius = node.radius ?? 0;
+  } else if (node.strokeDasharray === undefined) {
+    (patch as ILineInputData).dashPattern = [];
+  }
+
+  return patch;
 }
 
 const FRAME_LABEL_NAME_PREFIX = "label:";

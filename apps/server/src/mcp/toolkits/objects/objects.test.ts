@@ -140,13 +140,13 @@ describe("Objects MCP toolkit", () => {
           readonly nodeCount: number;
         };
       };
-      assert.strictEqual(createdPayload.object.revision, 2);
+      assert.strictEqual(createdPayload.object.revision, 1);
       assert.strictEqual(createdPayload.object.nodeCount, 2);
       const objectId = createdPayload.object.id;
 
       const mutated = yield* call("design_mutate", {
         id: objectId,
-        expectedRevision: 2,
+        expectedRevision: 1,
         summary: "Add submit button",
         ops: [
           {
@@ -168,7 +168,7 @@ describe("Objects MCP toolkit", () => {
       const mutatedPayload = mutated.structuredContent as {
         readonly object: { readonly revision: number; readonly nodeCount: number };
       };
-      assert.strictEqual(mutatedPayload.object.revision, 3);
+      assert.strictEqual(mutatedPayload.object.revision, 2);
       assert.strictEqual(mutatedPayload.object.nodeCount, 3);
 
       const inspected = yield* call("t3_object_read", { id: objectId });
@@ -189,7 +189,7 @@ describe("Objects MCP toolkit", () => {
       const restored = yield* call("design_revisions", {
         id: objectId,
         action: "restore",
-        revision: 2,
+        revision: 1,
       });
       assert.isFalse(restored.isError === true);
       const restoredPayload = restored.structuredContent as {
@@ -197,7 +197,7 @@ describe("Objects MCP toolkit", () => {
           readonly object: { readonly revision: number; readonly nodeCount: number };
         };
       };
-      assert.strictEqual(restoredPayload.restored.object.revision, 4);
+      assert.strictEqual(restoredPayload.restored.object.revision, 3);
       assert.strictEqual(restoredPayload.restored.object.nodeCount, 2);
     }).pipe(Effect.provide(makeTestLayer())),
   );

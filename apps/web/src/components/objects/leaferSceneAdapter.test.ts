@@ -4,6 +4,8 @@ import type { IUI } from "leafer-ui";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildLeaferNodePatchInput,
+  canPatchLeaferSceneInPlace,
   designDocumentToLeaferTree,
   extractTransformTargets,
   getFrameLabelName,
@@ -202,5 +204,100 @@ describe("leaferSceneAdapter", () => {
     expect(nestedCard?.tag).toBe("Box");
     expect(nestedCard?.hitChildren).toBe(true);
     expect(nestedCard?.hitSelf).toBe(true);
+  });
+
+  it("sanitizes unsafe image URLs and allows safe image URLs", () => {
+    const mutated = applyDesignMutations(emptyDesignDocument(), [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("bad-img"),
+          type: "image",
+          name: "Unsafe",
+          width: 120,
+          height: 80,
+          src: "javascript:alert(1)",
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("good-img"),
+          type: "image",
+          name: "Safe",
+          width: 120,
+          height: 80,
+          src: "https://example.com/pic.png",
+        },
+      },
+    ]);
+    expect(mutated.ok).toBe(true);
+    if (!mutated.ok) return;
+
+    const tree = designDocumentToLeaferTree(mutated.document);
+    const bad = tree.find((item) => item.id === "bad-img");
+    expect(bad?.tag).toBe("Rect");
+    expect(bad?.url).toBeUndefined();
+
+    const good = tree.find((item) => item.id === "good-img");
+    expect(good?.tag).toBe("Image");
+    expect(good?.url).toBe("https://example.com/pic.png");
+  });
+
+  it("detects when scene changes can be patched in place and clears removed visual props", () => {
+    const initial = applyDesignMutations(emptyDesignDocument(), [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("box"),
+          type: "rect",
+          name: "Box",
+          x: 10,
+          y: 20,
+          width: 100,
+          height: 80,
+          fill: "#2563eb",
+          stroke: "#ffffff",
+          strokeWidth: 2,
+          radius: 12,
+        },
+      },
+    ]);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+
+    const moved = applyDesignMutations(initial.document, [
+      {
+        op: "update",
+        id: DesignNodeId.make("box"),
+        patch: { x: 40, stroke: null, radius: null },
+      },
+    ]);
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+
+    expect(canPatchLeaferSceneInPlace(initial.document, moved.document)).toBe(true);
+    const patch = buildLeaferNodePatchInput(moved.document, DesignNodeId.make("box"), false);
+    expect(patch?.x).toBe(40);
+    expect(patch?.stroke).toBe("");
+    expect(patch?.strokeWidth).toBe(0);
+    expect(patch?.cornerRadius).toBe(0);
+    expect(patch?.tag).toBeUndefined();
+
+    const added = applyDesignMutations(moved.document, [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("box-2"),
+          type: "rect",
+          name: "Box 2",
+          width: 50,
+          height: 50,
+        },
+      },
+    ]);
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(canPatchLeaferSceneInPlace(moved.document, added.document)).toBe(false);
   });
 });

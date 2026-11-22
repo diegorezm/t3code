@@ -11,6 +11,7 @@ import {
   AlignLeftIcon,
   AlignRightIcon,
   DownloadIcon,
+  MessageSquarePlusIcon,
   Unlink2Icon,
   XIcon,
 } from "lucide-react";
@@ -152,6 +153,7 @@ export function DesignInspectorPanel({
   onSetBackground,
   onDetachFromParent,
   onExportNodes,
+  onAnnotateNodes,
 }: {
   readonly doc: DesignDocument;
   readonly width: number;
@@ -162,6 +164,7 @@ export function DesignInspectorPanel({
   readonly onExportNodes?:
     | ((nodeIds: ReadonlyArray<DesignNodeId>, format: DesignExportFormat) => void)
     | undefined;
+  readonly onAnnotateNodes?: ((nodeIds: ReadonlyArray<DesignNodeId>) => void) | undefined;
 }) {
   const gt = useGT();
   const selectedNodes = selectedIds
@@ -209,6 +212,19 @@ export function DesignInspectorPanel({
           <p className="text-2xs leading-relaxed text-muted-foreground">
             <T>Use arrow keys to nudge, copy/paste, duplicate, or export the selection.</T>
           </p>
+          {onAnnotateNodes !== undefined ? (
+            <Button
+              size="xs"
+              variant="secondary"
+              className="w-full"
+              onClick={() => onAnnotateNodes(validIds)}
+            >
+              <MessageSquarePlusIcon className="size-3.5" />
+              <span>
+                <T>Annotate for chat</T>
+              </span>
+            </Button>
+          ) : null}
           {onExportNodes !== undefined ? (
             <ExportSection onExport={(format) => onExportNodes(validIds, format)} />
           ) : null}

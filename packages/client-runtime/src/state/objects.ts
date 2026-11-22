@@ -1,6 +1,5 @@
 import {
   WS_METHODS,
-  type T3Object,
   type T3ObjectId,
   type T3ObjectRevisionSummary,
   type T3ObjectStreamEvent,
@@ -26,7 +25,6 @@ export interface OpenObjectRequest {
 export interface ObjectsEnvironmentState {
   readonly loaded: boolean;
   readonly summariesById: Readonly<Record<string, T3ObjectSummary>>;
-  readonly objectsById: Readonly<Record<string, T3Object>>;
   readonly latestRevisionById: Readonly<Record<string, T3ObjectRevisionSummary>>;
   readonly lastOpenRequest: OpenObjectRequest | null;
 }
@@ -34,24 +32,9 @@ export interface ObjectsEnvironmentState {
 export const EMPTY_OBJECTS_ENVIRONMENT_STATE: ObjectsEnvironmentState = {
   loaded: false,
   summariesById: {},
-  objectsById: {},
   latestRevisionById: {},
   lastOpenRequest: null,
 };
-
-function summaryFromObject(object: T3Object): T3ObjectSummary {
-  return {
-    id: object.id,
-    kind: object.kind,
-    title: object.title,
-    revision: object.revision,
-    nodeCount: object.nodeCount,
-    createdByThreadId: object.createdByThreadId,
-    createdAt: object.createdAt,
-    updatedAt: object.updatedAt,
-    archivedAt: object.archivedAt,
-  };
-}
 
 export function reduceT3ObjectStreamEvent(
   state: ObjectsEnvironmentState,
@@ -63,18 +46,10 @@ export function reduceT3ObjectStreamEvent(
       for (const summary of event.objects) {
         summariesById[summary.id] = summary;
       }
-      const objectsById: Record<string, T3Object> = {};
-      for (const [id, cached] of Object.entries(state.objectsById)) {
-        const nextSummary = summariesById[id];
-        if (nextSummary !== undefined && nextSummary.revision === cached.revision) {
-          objectsById[id] = { ...cached, ...nextSummary };
-        }
-      }
       return {
         ...state,
         loaded: true,
         summariesById,
-        objectsById,
       };
     }
     case "created": {
@@ -83,10 +58,6 @@ export function reduceT3ObjectStreamEvent(
         loaded: true,
         summariesById: {
           ...state.summariesById,
-          [event.object.id]: summaryFromObject(event.object),
-        },
-        objectsById: {
-          ...state.objectsById,
           [event.object.id]: event.object,
         },
       };
@@ -97,10 +68,6 @@ export function reduceT3ObjectStreamEvent(
         loaded: true,
         summariesById: {
           ...state.summariesById,
-          [event.object.id]: summaryFromObject(event.object),
-        },
-        objectsById: {
-          ...state.objectsById,
           [event.object.id]: event.object,
         },
         latestRevisionById: {
@@ -111,7 +78,6 @@ export function reduceT3ObjectStreamEvent(
     }
     case "renamed": {
       const existingSummary = state.summariesById[event.id];
-      const existingObject = state.objectsById[event.id];
       return {
         ...state,
         summariesById:
@@ -121,18 +87,10 @@ export function reduceT3ObjectStreamEvent(
                 ...state.summariesById,
                 [event.id]: { ...existingSummary, title: event.title, updatedAt: event.updatedAt },
               },
-        objectsById:
-          existingObject === undefined
-            ? state.objectsById
-            : {
-                ...state.objectsById,
-                [event.id]: { ...existingObject, title: event.title, updatedAt: event.updatedAt },
-              },
       };
     }
     case "archived": {
       const existingSummary = state.summariesById[event.id];
-      const existingObject = state.objectsById[event.id];
       return {
         ...state,
         summariesById:
@@ -146,30 +104,16 @@ export function reduceT3ObjectStreamEvent(
                   updatedAt: event.updatedAt,
                 },
               },
-        objectsById:
-          existingObject === undefined
-            ? state.objectsById
-            : {
-                ...state.objectsById,
-                [event.id]: {
-                  ...existingObject,
-                  archivedAt: event.archivedAt,
-                  updatedAt: event.updatedAt,
-                },
-              },
       };
     }
     case "deleted": {
       const nextSummaries = { ...state.summariesById };
-      const nextObjects = { ...state.objectsById };
       const nextRevisions = { ...state.latestRevisionById };
       delete nextSummaries[event.id];
-      delete nextObjects[event.id];
       delete nextRevisions[event.id];
       return {
         ...state,
         summariesById: nextSummaries,
-        objectsById: nextObjects,
         latestRevisionById: nextRevisions,
       };
     }

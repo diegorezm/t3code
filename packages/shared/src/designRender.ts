@@ -64,7 +64,7 @@ function sanitizeCssValue(value: string): string {
   return value.replace(/[;<>{}]/g, "").replace(/url\s*\(\s*['"]?\s*javascript:/gi, "");
 }
 
-function sanitizeImageSrc(src: string): string | null {
+export function sanitizeDesignImageSrc(src: string): string | null {
   const trimmed = src.trim();
   if (
     /^(?:https?:\/\/|\/api\/assets\/|data:image\/(?:png|jpeg|jpg|webp|gif);base64,)/i.test(trimmed)
@@ -78,7 +78,12 @@ export function sanitizeDesignSvg(raw: string): string {
   return raw
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, "")
+    .replace(/<(?:iframe|object|embed)\b[\s\S]*?(?:<\/(?:iframe|object|embed)>|\/>)/gi, "")
     .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(
+      /\s(?:xlink:)?href\s*=\s*(?:"\s*(?:javascript:|data:text\/html)[^"]*"|'\s*(?:javascript:|data:text\/html)[^']*')/gi,
+      "",
+    )
     .replace(/javascript:/gi, "");
 }
 
@@ -259,7 +264,7 @@ function renderNodeHtml(
       return `<div data-node-id="${escapeHtml(node.id)}" style="${styles.join(";")}">${sanitizeDesignSvg(node.svg)}</div>`;
     }
     case "image": {
-      const safeSrc = sanitizeImageSrc(node.src);
+      const safeSrc = sanitizeDesignImageSrc(node.src);
       const fit = node.objectFit ?? "cover";
       styles.push("overflow:hidden");
       const img =
@@ -772,7 +777,7 @@ function renderNodeSvg(
       return `<g id="${safeId}" transform="translate(${x}, ${y})"${opacityAttr}>${sanitizeDesignSvg(node.svg)}</g>`;
     }
     case "image": {
-      const safeSrc = sanitizeImageSrc(node.src);
+      const safeSrc = sanitizeDesignImageSrc(node.src);
       if (safeSrc === null) return "";
       return `<image id="${safeId}" x="${x}" y="${y}" width="${width}" height="${height}" href="${escapeHtml(safeSrc)}" preserveAspectRatio="${node.objectFit === "contain" ? "xMidYMid meet" : "xMidYMid slice"}"${opacityAttr}${rotateAttr} />`;
     }

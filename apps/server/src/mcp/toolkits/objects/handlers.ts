@@ -1,9 +1,8 @@
 import {
   OrchestratorMcpFailure,
   emptyDesignDocument,
-  type T3Object,
+  toT3ObjectSummary,
   type T3ObjectError,
-  type T3ObjectSummary,
 } from "@t3tools/contracts";
 import { inspectDesignDocument, renderDesignToHtml } from "@t3tools/shared/designRender";
 import * as Effect from "effect/Effect";
@@ -13,20 +12,6 @@ import * as T3Objects from "../../../objects/T3ObjectService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { DesignScreenshotToolkit, ObjectsStandardToolkit, type ObjectsToolkit } from "./tools.ts";
-
-function toSummary(object: T3Object): T3ObjectSummary {
-  return {
-    id: object.id,
-    kind: object.kind,
-    title: object.title,
-    revision: object.revision,
-    nodeCount: object.nodeCount,
-    createdByThreadId: object.createdByThreadId,
-    createdAt: object.createdAt,
-    updatedAt: object.updatedAt,
-    archivedAt: object.archivedAt,
-  };
-}
 
 function toMcpFailure(error: T3ObjectError): OrchestratorMcpFailure {
   const code =
@@ -58,33 +43,20 @@ const handlers = {
           kind: input.kind,
           title: input.title,
           document: emptyDesignDocument(input.background),
+          ...(input.ops !== undefined ? { ops: input.ops } : {}),
           summary: input.summary ?? "Created design object",
           actor: "agent",
           threadId,
         })
         .pipe(Effect.mapError(toMcpFailure));
 
-      const finalResult =
-        input.ops !== undefined && input.ops.length > 0
-          ? yield* objects
-              .mutateDesign({
-                id: created.object.id,
-                ops: input.ops,
-                summary: input.summary ?? "Populated initial design",
-                expectedRevision: created.object.revision,
-                actor: "agent",
-                threadId,
-              })
-              .pipe(Effect.mapError(toMcpFailure))
-          : created;
-
       if (input.open !== false) {
-        yield* objects.requestOpen({ id: finalResult.object.id, threadId }).pipe(Effect.ignore);
+        yield* objects.requestOpen({ id: created.object.id, threadId }).pipe(Effect.ignore);
       }
 
       return {
-        object: toSummary(finalResult.object),
-        revision: finalResult.revision,
+        object: toT3ObjectSummary(created.object),
+        revision: created.revision,
       };
     }),
   ),
@@ -96,7 +68,7 @@ const handlers = {
         frameId: input.frameId,
       });
       return {
-        object: toSummary(object),
+        object: toT3ObjectSummary(object),
         ...(object.content.document.background !== undefined
           ? { background: object.content.document.background }
           : {}),
@@ -112,7 +84,7 @@ const handlers = {
       const { object } = yield* objects
         .requestOpen({ id: input.id, threadId: scope.thread?.threadId ?? null })
         .pipe(Effect.mapError(toMcpFailure));
-      return { object: toSummary(object) };
+      return { object: toT3ObjectSummary(object) };
     }),
   ),
   t3_object_delete: McpToolAccess.actsAsCaller((input) =>
@@ -149,7 +121,7 @@ const handlers = {
         yield* objects.requestOpen({ id: result.object.id, threadId }).pipe(Effect.ignore);
       }
       return {
-        object: toSummary(result.object),
+        object: toT3ObjectSummary(result.object),
         revision: result.revision,
       };
     }),
@@ -180,7 +152,7 @@ const handlers = {
         .pipe(Effect.mapError(toMcpFailure));
       return {
         restored: {
-          object: toSummary(restored.object),
+          object: toT3ObjectSummary(restored.object),
           revision: restored.revision,
         },
       };
