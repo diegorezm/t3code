@@ -8,10 +8,16 @@ import { applyDesignMutations } from "@t3tools/shared/designDocument";
 import { describe, expect, it } from "vite-plus/test";
 import {
   buildDuplicateNodeOps,
+  buildDuplicateNodesOps,
+  buildPasteNodesOps,
   buildReorderNodeOp,
   clampBubblePosition,
   findPreviousRevision,
   getLayerOrderAvailability,
+  getSelectAllNodeIds,
+  normalizeSelectedNodeIds,
+  parseDesignClipboard,
+  serializeDesignClipboard,
 } from "./designEditorTypes";
 
 describe("designEditorTypes", () => {
@@ -206,5 +212,175 @@ describe("designEditorTypes", () => {
       id: c,
       index: 0,
     });
+  });
+
+  it("normalizes multi-selection by deduplicating and pruning descendants", () => {
+    const seeded = applyDesignMutations(emptyDesignDocument("#0f1117"), [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("card"),
+          type: "frame",
+          name: "Card",
+          width: 300,
+          height: 200,
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("title"),
+          type: "text",
+          name: "Title",
+          parentId: DesignNodeId.make("card"),
+          width: 200,
+          height: 30,
+          text: "Hello",
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("badge"),
+          type: "rect",
+          name: "Badge",
+          width: 80,
+          height: 24,
+        },
+      },
+    ]);
+    expect(seeded.ok).toBe(true);
+    if (!seeded.ok) return;
+
+    const card = DesignNodeId.make("card");
+    const title = DesignNodeId.make("title");
+    const badge = DesignNodeId.make("badge");
+    const missing = DesignNodeId.make("missing");
+
+    expect(normalizeSelectedNodeIds(seeded.document, [card, title, badge, card, missing])).toEqual([
+      card,
+      badge,
+    ]);
+    expect(getSelectAllNodeIds(seeded.document, [title])).toEqual([title]);
+    expect(getSelectAllNodeIds(seeded.document, [])).toEqual([card, badge]);
+  });
+
+  it("serializes, parses, and pastes single and multi-node subtrees across contexts", () => {
+    const seeded = applyDesignMutations(emptyDesignDocument("#0f1117"), [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("card-a"),
+          type: "frame",
+          name: "Starter",
+          x: 100,
+          y: 50,
+          width: 240,
+          height: 300,
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("label-a"),
+          type: "text",
+          name: "Label",
+          parentId: DesignNodeId.make("card-a"),
+          x: 20,
+          y: 20,
+          width: 120,
+          height: 24,
+          text: "Starter",
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("card-b"),
+          type: "frame",
+          name: "Pro",
+          x: 400,
+          y: 50,
+          width: 240,
+          height: 300,
+        },
+      },
+    ]);
+    expect(seeded.ok).toBe(true);
+    if (!seeded.ok) return;
+
+    const cardA = DesignNodeId.make("card-a");
+    const labelA = DesignNodeId.make("label-a");
+    const cardB = DesignNodeId.make("card-b");
+
+    // Copying parent + descendant prunes descendant so subtree isn't duplicated.
+    const clipboard = serializeDesignClipboard(seeded.document, [cardA, labelA]);
+    expect(clipboard).not.toBeNull();
+    if (clipboard === null) return;
+    expect(clipboard.entries).toHaveLength(1);
+    expect(clipboard.entries[0]?.tree.children).toHaveLength(1);
+
+    const roundTripped = parseDesignClipboard(JSON.stringify(clipboard));
+    expect(roundTripped).toEqual(clipboard);
+    expect(parseDesignClipboard("plain text")).toBeNull();
+    expect(parseDesignClipboard('{"foo":1}')).toBeNull();
+
+    // Pasting while the copied frame itself is still selected pastes as an offset sibling (not inside itself).
+    let seq = 1;
+    const pastedSibling = buildPasteNodesOps(seeded.document, clipboard, {
+      selectedIds: [cardA],
+      pasteCount: 1,
+      createId: () => DesignNodeId.make(`pasted-${seq++}`),
+    });
+    expect(pastedSibling).not.toBeNull();
+    if (pastedSibling === null) return;
+    const appliedSibling = applyDesignMutations(seeded.document, pastedSibling.ops);
+    expect(appliedSibling.ok).toBe(true);
+    if (!appliedSibling.ok) return;
+    const cloneA = appliedSibling.document.nodes[pastedSibling.pastedRootIds[0]!];
+    expect(cloneA?.parentId).toBeNull();
+    expect(cloneA?.x).toBe(120);
+    expect(cloneA?.y).toBe(70);
+    expect(cloneA?.type === "frame" ? cloneA.childIds.length : 0).toBe(1);
+
+    // Pasting a copied child while another frame (cardB) is selected pastes inside cardB.
+    const childClipboard = serializeDesignClipboard(seeded.document, [labelA]);
+    expect(childClipboard).not.toBeNull();
+    if (childClipboard === null) return;
+    const pastedIntoB = buildPasteNodesOps(seeded.document, childClipboard, {
+      selectedIds: [cardB],
+      createId: () => DesignNodeId.make(`pasted-${seq++}`),
+    });
+    expect(pastedIntoB).not.toBeNull();
+    if (pastedIntoB === null) return;
+    const appliedIntoB = applyDesignMutations(seeded.document, pastedIntoB.ops);
+    expect(appliedIntoB.ok).toBe(true);
+    if (!appliedIntoB.ok) return;
+    const pastedLabel = appliedIntoB.document.nodes[pastedIntoB.pastedRootIds[0]!];
+    expect(pastedLabel?.parentId).toBe(cardB);
+
+    // Pasting at explicit world coordinates places multi-node selection with preserved relative offsets.
+    const multiClipboard = serializeDesignClipboard(seeded.document, [cardA, cardB]);
+    expect(multiClipboard).not.toBeNull();
+    if (multiClipboard === null) return;
+    const pastedAt = buildPasteNodesOps(seeded.document, multiClipboard, {
+      pasteAt: { x: 50, y: 500 },
+      createId: () => DesignNodeId.make(`pasted-${seq++}`),
+    });
+    expect(pastedAt).not.toBeNull();
+    if (pastedAt === null) return;
+    const appliedAt = applyDesignMutations(seeded.document, pastedAt.ops);
+    expect(appliedAt.ok).toBe(true);
+    if (!appliedAt.ok) return;
+    expect(appliedAt.document.nodes[pastedAt.pastedRootIds[0]!]?.x).toBe(50);
+    expect(appliedAt.document.nodes[pastedAt.pastedRootIds[0]!]?.y).toBe(500);
+    expect(appliedAt.document.nodes[pastedAt.pastedRootIds[1]!]?.x).toBe(350);
+    expect(appliedAt.document.nodes[pastedAt.pastedRootIds[1]!]?.y).toBe(500);
+
+    // Multi-node duplicate clones both cards in one batch.
+    const dupMulti = buildDuplicateNodesOps(seeded.document, [cardA, cardB], () =>
+      DesignNodeId.make(`dup-${seq++}`),
+    );
+    expect(dupMulti?.rootCloneIds).toHaveLength(2);
   });
 });

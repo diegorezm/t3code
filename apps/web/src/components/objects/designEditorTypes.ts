@@ -307,21 +307,85 @@ function cloneNodeToInput(
   }
 }
 
+function isNodeDescendant(
+  doc: DesignDocument,
+  candidateAncestorId: DesignNodeId,
+  nodeId: DesignNodeId,
+): boolean {
+  let cursor = doc.nodes[nodeId];
+  while (cursor !== undefined) {
+    if (cursor.parentId === candidateAncestorId) return true;
+    if (cursor.parentId === null) return false;
+    cursor = doc.nodes[cursor.parentId];
+  }
+  return false;
+}
+
+export function normalizeSelectedNodeIds(
+  doc: DesignDocument,
+  ids: ReadonlyArray<DesignNodeId>,
+): ReadonlyArray<DesignNodeId> {
+  const unique: Array<DesignNodeId> = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id) || !(id in doc.nodes)) continue;
+    seen.add(id);
+    unique.push(id);
+  }
+  if (unique.length <= 1) return unique;
+  return unique.filter(
+    (id) => !unique.some((other) => other !== id && isNodeDescendant(doc, other, id)),
+  );
+}
+
+export function getSelectAllNodeIds(
+  doc: DesignDocument,
+  currentSelectedIds: ReadonlyArray<DesignNodeId>,
+): ReadonlyArray<DesignNodeId> {
+  const normalized = normalizeSelectedNodeIds(doc, currentSelectedIds);
+  if (normalized.length > 0) {
+    const first = doc.nodes[normalized[0]!];
+    if (first !== undefined && first.parentId !== null) {
+      const parent = doc.nodes[first.parentId];
+      if (parent?.type === "frame") {
+        const siblings = parent.childIds.filter((id) => {
+          const child = doc.nodes[id];
+          return child !== undefined && child.visible !== false && child.locked !== true;
+        });
+        if (siblings.length > 0) return siblings;
+      }
+    }
+  }
+  return doc.rootIds.filter((id) => {
+    const node = doc.nodes[id];
+    return node !== undefined && node.visible !== false && node.locked !== true;
+  });
+}
+
+function getNodeWorldPosition(doc: DesignDocument, nodeId: DesignNodeId): Point2D {
+  let x = 0;
+  let y = 0;
+  let cursor = doc.nodes[nodeId];
+  while (cursor !== undefined) {
+    x += cursor.x;
+    y += cursor.y;
+    if (cursor.parentId === null) break;
+    cursor = doc.nodes[cursor.parentId];
+  }
+  return { x, y };
+}
+
 function defaultCloneNodeId(): DesignNodeId {
   const token = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   return DesignNodeId.make(`node_${token}`);
 }
 
-export function buildDuplicateNodeOps(
+function createUniqueIdFactory(
   doc: DesignDocument,
-  nodeId: DesignNodeId,
   createId: () => DesignNodeId = defaultCloneNodeId,
-): { readonly ops: ReadonlyArray<DesignMutationOp>; readonly rootCloneId: DesignNodeId } | null {
-  const original = doc.nodes[nodeId];
-  if (original === undefined) return null;
-
+): () => DesignNodeId {
   const usedIds = new Set<string>(Object.keys(doc.nodes));
-  const nextUniqueId = (): DesignNodeId => {
+  return () => {
     let candidate = createId();
     while (usedIds.has(candidate)) {
       candidate = createId();
@@ -329,44 +393,317 @@ export function buildDuplicateNodeOps(
     usedIds.add(candidate);
     return candidate;
   };
+}
 
-  const parent = original.parentId === null ? undefined : doc.nodes[original.parentId];
-  const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
-  const siblings = getSiblingIds(doc, original);
-  const originalIndex = siblings.indexOf(nodeId);
-  const insertIndex = originalIndex >= 0 ? originalIndex + 1 : undefined;
+export function buildDuplicateNodesOps(
+  doc: DesignDocument,
+  nodeIds: ReadonlyArray<DesignNodeId>,
+  createId: () => DesignNodeId = defaultCloneNodeId,
+): {
+  readonly ops: ReadonlyArray<DesignMutationOp>;
+  readonly rootCloneIds: ReadonlyArray<DesignNodeId>;
+} | null {
+  const normalized = normalizeSelectedNodeIds(doc, nodeIds);
+  if (normalized.length === 0) return null;
+
+  const nextUniqueId = createUniqueIdFactory(doc, createId);
+  const ops: Array<DesignMutationOp> = [];
+  const rootCloneIds: Array<DesignNodeId> = [];
+
+  // Track extra insertions per parent so multi-node sibling duplicates stay cleanly ordered.
+  const insertedCountByParent = new Map<string, number>();
+
+  for (const nodeId of normalized) {
+    const original = doc.nodes[nodeId];
+    if (original === undefined) continue;
+
+    const parentKey = original.parentId ?? "__root__";
+    const parent = original.parentId === null ? undefined : doc.nodes[original.parentId];
+    const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
+    const siblings = getSiblingIds(doc, original);
+    const originalIndex = siblings.indexOf(nodeId);
+    const prevInserted = insertedCountByParent.get(parentKey) ?? 0;
+    const insertIndex = originalIndex >= 0 ? originalIndex + 1 + prevInserted : undefined;
+    insertedCountByParent.set(parentKey, prevInserted + 1);
+
+    const rootCloneId = nextUniqueId();
+    rootCloneIds.push(rootCloneId);
+
+    const visit = (
+      source: DesignNode,
+      cloneId: DesignNodeId,
+      parentId: DesignNodeId | null,
+      isRoot: boolean,
+    ) => {
+      const input = cloneNodeToInput(source, {
+        id: cloneId,
+        name: isRoot ? `${source.name} copy` : source.name,
+        parentId,
+        x: isRoot && !inAutoLayoutParent ? source.x + 20 : source.x,
+        y: isRoot && !inAutoLayoutParent ? source.y + 20 : source.y,
+      });
+      ops.push(
+        isRoot && insertIndex !== undefined
+          ? { op: "add", node: input, index: insertIndex }
+          : { op: "add", node: input },
+      );
+
+      if (source.type === "frame") {
+        for (const childId of source.childIds) {
+          const child = doc.nodes[childId];
+          if (child === undefined) continue;
+          visit(child, nextUniqueId(), cloneId, false);
+        }
+      }
+    };
+
+    visit(original, rootCloneId, original.parentId, true);
+  }
+
+  return ops.length > 0 ? { ops, rootCloneIds } : null;
+}
+
+export function buildDuplicateNodeOps(
+  doc: DesignDocument,
+  nodeId: DesignNodeId,
+  createId: () => DesignNodeId = defaultCloneNodeId,
+): { readonly ops: ReadonlyArray<DesignMutationOp>; readonly rootCloneId: DesignNodeId } | null {
+  const result = buildDuplicateNodesOps(doc, [nodeId], createId);
+  if (result === null || result.rootCloneIds[0] === undefined) return null;
+  return { ops: result.ops, rootCloneId: result.rootCloneIds[0] };
+}
+
+export interface DesignClipboardNodeTree {
+  readonly input: DesignNodeInput;
+  readonly children: ReadonlyArray<DesignClipboardNodeTree>;
+}
+
+export interface DesignClipboardEntry {
+  readonly sourceId: DesignNodeId;
+  readonly sourceParentId: DesignNodeId | null;
+  readonly worldX: number;
+  readonly worldY: number;
+  readonly tree: DesignClipboardNodeTree;
+}
+
+export interface DesignClipboardPayload {
+  readonly __t3DesignClipboard: 1;
+  readonly entries: ReadonlyArray<DesignClipboardEntry>;
+}
+
+function serializeSubtree(doc: DesignDocument, node: DesignNode): DesignClipboardNodeTree {
+  const input = cloneNodeToInput(node, {
+    id: node.id,
+    name: node.name,
+    parentId: node.parentId,
+    x: node.x,
+    y: node.y,
+  });
+  const children: Array<DesignClipboardNodeTree> = [];
+  if (node.type === "frame") {
+    for (const childId of node.childIds) {
+      const child = doc.nodes[childId];
+      if (child === undefined) continue;
+      children.push(serializeSubtree(doc, child));
+    }
+  }
+  return { input, children };
+}
+
+export function serializeDesignClipboard(
+  doc: DesignDocument,
+  nodeIds: ReadonlyArray<DesignNodeId>,
+): DesignClipboardPayload | null {
+  const normalized = normalizeSelectedNodeIds(doc, nodeIds);
+  if (normalized.length === 0) return null;
+
+  const entries: Array<DesignClipboardEntry> = [];
+  for (const id of normalized) {
+    const node = doc.nodes[id];
+    if (node === undefined) continue;
+    const world = getNodeWorldPosition(doc, id);
+    entries.push({
+      sourceId: id,
+      sourceParentId: node.parentId,
+      worldX: world.x,
+      worldY: world.y,
+      tree: serializeSubtree(doc, node),
+    });
+  }
+  return entries.length > 0 ? { __t3DesignClipboard: 1, entries } : null;
+}
+
+const VALID_NODE_TYPES = new Set(["frame", "rect", "ellipse", "text", "line", "svg", "image"]);
+
+function isValidClipboardTree(value: unknown): value is DesignClipboardNodeTree {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { input?: unknown; children?: unknown };
+  if (typeof candidate.input !== "object" || candidate.input === null) return false;
+  const input = candidate.input as {
+    type?: unknown;
+    name?: unknown;
+    width?: unknown;
+    height?: unknown;
+  };
+  if (
+    typeof input.type !== "string" ||
+    !VALID_NODE_TYPES.has(input.type) ||
+    typeof input.name !== "string" ||
+    typeof input.width !== "number" ||
+    typeof input.height !== "number"
+  ) {
+    return false;
+  }
+  if (!Array.isArray(candidate.children)) return false;
+  return candidate.children.every((child) => isValidClipboardTree(child));
+}
+
+export function parseDesignClipboard(raw: string): DesignClipboardPayload | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      __t3DesignClipboard?: unknown;
+      entries?: unknown;
+    };
+    if (parsed.__t3DesignClipboard !== 1 || !Array.isArray(parsed.entries)) return null;
+    if (parsed.entries.length === 0) return null;
+    for (const entry of parsed.entries) {
+      if (typeof entry !== "object" || entry === null) return null;
+      const item = entry as {
+        sourceId?: unknown;
+        sourceParentId?: unknown;
+        worldX?: unknown;
+        worldY?: unknown;
+        tree?: unknown;
+      };
+      if (
+        typeof item.sourceId !== "string" ||
+        (item.sourceParentId !== null && typeof item.sourceParentId !== "string") ||
+        typeof item.worldX !== "number" ||
+        typeof item.worldY !== "number" ||
+        !isValidClipboardTree(item.tree)
+      ) {
+        return null;
+      }
+    }
+    return parsed as DesignClipboardPayload;
+  } catch {
+    return null;
+  }
+}
+
+export function buildPasteNodesOps(
+  doc: DesignDocument,
+  payload: DesignClipboardPayload,
+  options: {
+    readonly selectedIds?: ReadonlyArray<DesignNodeId>;
+    readonly pasteAt?: Point2D | null;
+    readonly pasteCount?: number;
+    readonly viewportCenter?: Point2D;
+    readonly createId?: () => DesignNodeId;
+  } = {},
+): {
+  readonly ops: ReadonlyArray<DesignMutationOp>;
+  readonly pastedRootIds: ReadonlyArray<DesignNodeId>;
+} | null {
+  if (payload.entries.length === 0) return null;
+
+  const nextUniqueId = createUniqueIdFactory(doc, options.createId);
+  const offset = 20 * Math.max(1, options.pasteCount ?? 1);
+  const sourceIdSet = new Set<string>(payload.entries.map((entry) => entry.sourceId));
+
+  // If the user explicitly selected a different single frame (not one of the copied nodes),
+  // paste directly inside that frame.
+  const normalizedSelected = normalizeSelectedNodeIds(doc, options.selectedIds ?? []);
+  const explicitTargetFrame =
+    options.pasteAt == null && normalizedSelected.length === 1
+      ? (() => {
+          const candidateId = normalizedSelected[0]!;
+          const candidate = doc.nodes[candidateId];
+          if (candidate?.type !== "frame") return null;
+          if (sourceIdSet.has(candidateId)) return null;
+          return candidate;
+        })()
+      : null;
+
+  let minWorldX = Infinity;
+  let minWorldY = Infinity;
+  let maxWorldX = -Infinity;
+  let maxWorldY = -Infinity;
+  for (const entry of payload.entries) {
+    minWorldX = Math.min(minWorldX, entry.worldX);
+    minWorldY = Math.min(minWorldY, entry.worldY);
+    maxWorldX = Math.max(maxWorldX, entry.worldX + entry.tree.input.width);
+    maxWorldY = Math.max(maxWorldY, entry.worldY + entry.tree.input.height);
+  }
+  const groupW = Math.max(0, maxWorldX - minWorldX);
+  const groupH = Math.max(0, maxWorldY - minWorldY);
 
   const ops: Array<DesignMutationOp> = [];
-  const rootCloneId = nextUniqueId();
+  const pastedRootIds: Array<DesignNodeId> = [];
 
-  const visit = (
-    source: DesignNode,
+  const emitTree = (
+    tree: DesignClipboardNodeTree,
     cloneId: DesignNodeId,
     parentId: DesignNodeId | null,
-    isRoot: boolean,
+    x: number,
+    y: number,
   ) => {
-    const input = cloneNodeToInput(source, {
+    const input: DesignNodeInput = {
+      ...tree.input,
       id: cloneId,
-      name: isRoot ? `${source.name} copy` : source.name,
       parentId,
-      x: isRoot && !inAutoLayoutParent ? source.x + 20 : source.x,
-      y: isRoot && !inAutoLayoutParent ? source.y + 20 : source.y,
-    });
-    ops.push(
-      isRoot && insertIndex !== undefined
-        ? { op: "add", node: input, index: insertIndex }
-        : { op: "add", node: input },
-    );
-
-    if (source.type === "frame") {
-      for (const childId of source.childIds) {
-        const child = doc.nodes[childId];
-        if (child === undefined) continue;
-        visit(child, nextUniqueId(), cloneId, false);
-      }
+      x: Math.round(x),
+      y: Math.round(y),
+    };
+    ops.push({ op: "add", node: input });
+    for (const child of tree.children) {
+      emitTree(child, nextUniqueId(), cloneId, child.input.x ?? 0, child.input.y ?? 0);
     }
   };
 
-  visit(original, rootCloneId, original.parentId, true);
-  return { ops, rootCloneId };
+  for (const entry of payload.entries) {
+    const cloneId = nextUniqueId();
+    pastedRootIds.push(cloneId);
+
+    if (options.pasteAt !== undefined && options.pasteAt !== null) {
+      const targetX = options.pasteAt.x + (entry.worldX - minWorldX);
+      const targetY = options.pasteAt.y + (entry.worldY - minWorldY);
+      emitTree(entry.tree, cloneId, null, targetX, targetY);
+      continue;
+    }
+
+    if (explicitTargetFrame !== null) {
+      const inAutoLayout = explicitTargetFrame.layout !== undefined;
+      const targetX = inAutoLayout ? (entry.tree.input.x ?? 0) : 20 + (entry.worldX - minWorldX);
+      const targetY = inAutoLayout ? (entry.tree.input.y ?? 0) : 20 + (entry.worldY - minWorldY);
+      emitTree(entry.tree, cloneId, explicitTargetFrame.id, targetX, targetY);
+      continue;
+    }
+
+    if (entry.sourceParentId === null) {
+      const targetX = (entry.tree.input.x ?? entry.worldX) + offset;
+      const targetY = (entry.tree.input.y ?? entry.worldY) + offset;
+      emitTree(entry.tree, cloneId, null, targetX, targetY);
+      continue;
+    }
+
+    const originalParent = doc.nodes[entry.sourceParentId];
+    if (originalParent?.type === "frame") {
+      const inAutoLayout = originalParent.layout !== undefined;
+      const targetX = inAutoLayout ? (entry.tree.input.x ?? 0) : (entry.tree.input.x ?? 0) + offset;
+      const targetY = inAutoLayout ? (entry.tree.input.y ?? 0) : (entry.tree.input.y ?? 0) + offset;
+      emitTree(entry.tree, cloneId, originalParent.id, targetX, targetY);
+      continue;
+    }
+
+    // Fallback (e.g., pasted across different Design Objects): place centered in viewport.
+    const center = options.viewportCenter ?? { x: 120 + groupW / 2, y: 120 + groupH / 2 };
+    const targetX = center.x - groupW / 2 + (entry.worldX - minWorldX);
+    const targetY = center.y - groupH / 2 + (entry.worldY - minWorldY);
+    emitTree(entry.tree, cloneId, null, targetX, targetY);
+  }
+
+  return ops.length > 0 ? { ops, pastedRootIds } : null;
 }

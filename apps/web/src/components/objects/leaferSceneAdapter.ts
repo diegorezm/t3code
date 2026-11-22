@@ -155,7 +155,7 @@ function mapFontWeight(weight: number | string | undefined): IFontWeight {
   return bucket as IFontWeight;
 }
 
-function designNodeToLeaferInput(
+export function designNodeToLeaferInput(
   doc: DesignDocument,
   nodeId: DesignNodeId,
   inAutoLayoutParent: boolean,
@@ -210,15 +210,22 @@ function designNodeToLeaferInput(
   switch (node.type) {
     case "frame": {
       const hasFlow = node.layout !== undefined;
+      const isRootFrame = node.parentId === null;
       const children = node.childIds
         .map((childId) => designNodeToLeaferInput(doc, childId, hasFlow))
         .filter((child): child is IUIInputData => child !== null);
 
       const frameInput: IUIInputData = {
         ...base,
-        tag: "Box",
+        tag: isRootFrame ? "Frame" : "Box",
+        // Leafer's Frame defaults fill to "#FFFFFF"; keep transparent when unset.
+        ...(isRootFrame && base.fill === undefined ? { fill: "" } : {}),
         overflow: node.clip === false ? "show" : "hide",
+        // Keep both hitChildren and hitSelf enabled on all frames: Leafer's Picker checks
+        // `child.__hitWorld(point, true)` on rounded clipped frames (cornerRadius > 0) before
+        // recursing into children, and `__hitWorld` short-circuits to false when `hitSelf` is false.
         hitChildren: true,
+        hitSelf: true,
         children,
       };
 
@@ -268,6 +275,7 @@ function designNodeToLeaferInput(
         lineHeight: { type: "percent", value: lineHeight },
         ...(node.letterSpacing !== undefined ? { letterSpacing: node.letterSpacing } : {}),
         textWrap: "normal",
+        hitBox: true,
       };
     }
 

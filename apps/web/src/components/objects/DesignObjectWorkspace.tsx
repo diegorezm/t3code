@@ -15,14 +15,16 @@ import {
 } from "@t3tools/contracts";
 import { applyDesignMutations } from "@t3tools/shared/designDocument";
 import { renderDesignToHtml, renderDesignToSvg } from "@t3tools/shared/designRender";
-import { T, useGT } from "gt-react";
+import { T, useGT, Var } from "gt-react";
 import {
   ArrowDownIcon,
   ArrowDownToLineIcon,
   ArrowUpIcon,
   ArrowUpToLineIcon,
   CircleIcon,
+  ClipboardPasteIcon,
   CopyIcon,
+  CopyPlusIcon,
   DownloadIcon,
   EyeIcon,
   EyeOffIcon,
@@ -40,6 +42,8 @@ import {
   PanelRightIcon,
   PencilIcon,
   Redo2Icon,
+  ScissorsIcon,
+  ShapesIcon,
   SquareIcon,
   Trash2Icon,
   TypeIcon,
@@ -95,15 +99,21 @@ import {
   type DesignCanvasContextMenuRequest,
   type DesignCanvasHandle,
 } from "./DesignCanvasViewport";
-import { DesignInspectorPanel } from "./DesignInspectorPanel";
+import { DesignInspectorPanel, type DesignExportFormat } from "./DesignInspectorPanel";
 import { DesignLayersPanel } from "./DesignLayersPanel";
 import {
-  buildDuplicateNodeOps,
+  buildDuplicateNodesOps,
+  buildPasteNodesOps,
   buildReorderNodeOp,
   findPreviousRevision,
   getLayerOrderAvailability,
+  getSelectAllNodeIds,
   isEditableTarget,
   makeNodeInputForTool,
+  normalizeSelectedNodeIds,
+  parseDesignClipboard,
+  serializeDesignClipboard,
+  type DesignClipboardPayload,
   type DesignTool,
   type LayerOrderDirection,
   type Point2D,
@@ -113,6 +123,11 @@ import {
 
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 440;
+
+// In-memory clipboard fallback so Copy/Cut/Paste works reliably even without browser
+// clipboard permissions and persists when switching between Design Objects.
+let sharedDesignClipboard: DesignClipboardPayload | null = null;
+let sharedDesignPasteCount = 0;
 
 function clampSidebarWidth(width: number): number {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
@@ -126,14 +141,17 @@ function slugifyFilename(title: string): string {
   return slug.length > 0 ? slug : "design";
 }
 
-function triggerFileDownload(content: string, mimeType: string, filename: string): void {
-  const blob = new Blob([content], { type: mimeType });
+function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function triggerFileDownload(content: string, mimeType: string, filename: string): void {
+  triggerBlobDownload(new Blob([content], { type: mimeType }), filename);
 }
 
 function buildDesignElementAnnotation(input: {
@@ -204,6 +222,7 @@ type DesignContextMenuState =
   | {
       readonly kind: "node";
       readonly nodeId: DesignNodeId;
+      readonly nodeIds: ReadonlyArray<DesignNodeId>;
       readonly x: number;
       readonly y: number;
       readonly renameTarget: "canvas" | "layers";
@@ -253,7 +272,7 @@ export function DesignObjectWorkspace({
   const [loadedRevisionsKey, setLoadedRevisionsKey] = useState<string | null>(null);
 
   const [tool, setTool] = useState<DesignTool>("select");
-  const [selectedId, setSelectedId] = useState<DesignNodeId | null>(null);
+  const [selectedIds, setSelectedIds] = useState<ReadonlyArray<DesignNodeId>>([]);
   const [renamingLayerId, setRenamingLayerId] = useState<DesignNodeId | null>(null);
   const [contextMenu, setContextMenu] = useState<DesignContextMenuState | null>(null);
   const [selectionAnchorWorld, setSelectionAnchorWorld] = useState<Point2D | null>(null);
@@ -287,8 +306,11 @@ export function DesignObjectWorkspace({
   const currentDoc: DesignDocument =
     optimisticDoc ?? activeObject?.content.document ?? emptyDesignDocument();
 
+  const normalizedSelectedIds = normalizeSelectedNodeIds(currentDoc, selectedIds);
+  const primarySelectedId: DesignNodeId | null =
+    normalizedSelectedIds.length === 1 ? normalizedSelectedIds[0]! : null;
   const selectedNode: DesignNode | undefined =
-    selectedId === null ? undefined : currentDoc.nodes[selectedId];
+    primarySelectedId === null ? undefined : currentDoc.nodes[primarySelectedId];
 
   const streamedRevision = streamedSummary?.revision ?? streamedObject?.revision ?? null;
 
@@ -357,17 +379,18 @@ export function DesignObjectWorkspace({
   const commitOps = (
     ops: ReadonlyArray<DesignMutationOp>,
     summary: string,
-    options?: { readonly selectId?: DesignNodeId },
+    options?: { readonly selectIds?: ReadonlyArray<DesignNodeId> },
   ) => {
     if (activeObject === null) return;
     const baseRevision = activeObject.revision;
     const preview = applyDesignMutations(currentDoc, ops);
     if (preview.ok) {
       setOptimisticDoc(preview.document);
-      if (options?.selectId !== undefined) {
-        setSelectedId(options.selectId);
+      if (options?.selectIds !== undefined) {
+        setSelectedIds(options.selectIds);
       } else if (preview.createdIds.length > 0) {
-        setSelectedId(preview.createdIds[preview.createdIds.length - 1] ?? null);
+        const lastCreated = preview.createdIds[preview.createdIds.length - 1];
+        setSelectedIds(lastCreated !== undefined ? [lastCreated] : []);
       }
     }
     setActionError(null);
@@ -450,12 +473,15 @@ export function DesignObjectWorkspace({
     handlePatchNode(node.id, { name: trimmed }, `Renamed ${node.name} to ${trimmed}`);
   };
 
-  const handleDuplicateNode = (id: DesignNodeId) => {
-    const target = currentDoc.nodes[id];
-    const duplicated = buildDuplicateNodeOps(currentDoc, id);
-    if (target === undefined || duplicated === null) return;
-    commitOps(duplicated.ops, `Duplicated ${target.name}`, {
-      selectId: duplicated.rootCloneId,
+  const handleDuplicateNodes = (ids: ReadonlyArray<DesignNodeId>) => {
+    const duplicated = buildDuplicateNodesOps(currentDoc, ids);
+    if (duplicated === null) return;
+    const summary =
+      duplicated.rootCloneIds.length === 1
+        ? `Duplicated ${currentDoc.nodes[ids[0]!]?.name ?? "layer"}`
+        : `Duplicated ${duplicated.rootCloneIds.length} layers`;
+    commitOps(duplicated.ops, summary, {
+      selectIds: duplicated.rootCloneIds,
     });
   };
 
@@ -466,22 +492,117 @@ export function DesignObjectWorkspace({
     commitOps([op], `Reordered ${target.name}`);
   };
 
-  const handleDeleteNode = (id: DesignNodeId) => {
-    const target = currentDoc.nodes[id];
-    if (selectedId === id) {
-      setSelectedId(null);
-      setSelectionAnchorWorld(null);
-    }
-    if (renamingLayerId === id) {
+  const handleDeleteNodes = (ids: ReadonlyArray<DesignNodeId>) => {
+    const normalized = normalizeSelectedNodeIds(currentDoc, ids);
+    if (normalized.length === 0) return;
+    const deleteSet = new Set<string>(normalized);
+    setSelectedIds((prev) => prev.filter((id) => !deleteSet.has(id)));
+    if (renamingLayerId !== null && deleteSet.has(renamingLayerId)) {
       setRenamingLayerId(null);
     }
-    commitOps([{ op: "delete", id }], `Deleted ${target?.name ?? "layer"}`);
+    setSelectionAnchorWorld(null);
+    const ops: Array<DesignMutationOp> = normalized.map((id) => ({ op: "delete", id }));
+    const summary =
+      normalized.length === 1
+        ? `Deleted ${currentDoc.nodes[normalized[0]!]?.name ?? "layer"}`
+        : `Deleted ${normalized.length} layers`;
+    commitOps(ops, summary, { selectIds: [] });
+  };
+
+  const handleCopyNodes = (ids: ReadonlyArray<DesignNodeId>): string | null => {
+    const payload = serializeDesignClipboard(currentDoc, ids);
+    if (payload === null) return null;
+    sharedDesignClipboard = payload;
+    sharedDesignPasteCount = 0;
+    const serialized = JSON.stringify(payload);
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText !== undefined) {
+      void navigator.clipboard.writeText(serialized).catch(() => undefined);
+    }
+    return serialized;
+  };
+
+  const handleCutNodes = (ids: ReadonlyArray<DesignNodeId>): string | null => {
+    const serialized = handleCopyNodes(ids);
+    if (serialized === null) return null;
+    handleDeleteNodes(ids);
+    return serialized;
+  };
+
+  const pastePayload = (
+    payload: DesignClipboardPayload,
+    pasteAt: Point2D | null = null,
+  ): boolean => {
+    const nextPasteCount = pasteAt === null ? sharedDesignPasteCount + 1 : 1;
+    const viewportCenter = canvasHandleRef.current?.getViewportCenterWorld();
+    const pasted = buildPasteNodesOps(currentDoc, payload, {
+      selectedIds: normalizedSelectedIds,
+      pasteAt,
+      pasteCount: nextPasteCount,
+      ...(viewportCenter !== undefined ? { viewportCenter } : {}),
+    });
+    if (pasted === null) return false;
+    if (pasteAt === null) {
+      sharedDesignPasteCount = nextPasteCount;
+    }
+    const summary =
+      pasted.pastedRootIds.length === 1
+        ? `Pasted ${payload.entries[0]?.tree.input.name ?? "layer"}`
+        : `Pasted ${pasted.pastedRootIds.length} layers`;
+    commitOps(pasted.ops, summary, { selectIds: pasted.pastedRootIds });
+    return true;
+  };
+
+  const handlePaste = (options?: {
+    readonly pasteAt?: Point2D | null;
+    readonly clipboardText?: string | null;
+  }) => {
+    const pasteAt = options?.pasteAt ?? null;
+    if (options?.clipboardText !== undefined && options.clipboardText !== null) {
+      const fromText = parseDesignClipboard(options.clipboardText);
+      if (fromText !== null) {
+        sharedDesignClipboard = fromText;
+        pastePayload(fromText, pasteAt);
+        return;
+      }
+    }
+    if (sharedDesignClipboard !== null) {
+      pastePayload(sharedDesignClipboard, pasteAt);
+      return;
+    }
+    if (typeof navigator !== "undefined" && navigator.clipboard?.readText !== undefined) {
+      void navigator.clipboard
+        .readText()
+        .then((text) => {
+          const parsed = parseDesignClipboard(text);
+          if (parsed !== null) {
+            sharedDesignClipboard = parsed;
+            sharedDesignPasteCount = 0;
+            pastePayload(parsed, pasteAt);
+          }
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const handleNudgeNodes = (dx: number, dy: number) => {
+    const ops: Array<DesignMutationOp> = [];
+    let lastName = "layer";
+    for (const id of normalizedSelectedIds) {
+      const node = currentDoc.nodes[id];
+      if (node === undefined || node.locked === true) continue;
+      const parent = node.parentId === null ? undefined : currentDoc.nodes[node.parentId];
+      if (parent?.type === "frame" && parent.layout !== undefined) continue;
+      ops.push({ op: "update", id, patch: { x: node.x + dx, y: node.y + dy } });
+      lastName = node.name;
+    }
+    if (ops.length === 0) return;
+    commitOps(ops, ops.length === 1 ? `Nudged ${lastName}` : `Nudged ${ops.length} layers`);
   };
 
   const handleAnnotateNode = (id: DesignNodeId) => {
     if (threadRef === undefined) return;
     setPickActive(true);
-    setSelectedId(id);
+    setSelectedIds([id]);
     setAskChatNote("");
     const anchor = canvasHandleRef.current?.getNodeAnchorWorld(id) ?? null;
     if (anchor !== null) {
@@ -497,9 +618,11 @@ export function DesignObjectWorkspace({
   const handleCanvasContextMenu = (request: DesignCanvasContextMenuRequest) => {
     if (request.kind === "node") {
       if (!(request.nodeId in currentDoc.nodes)) return;
+      const validIds = normalizeSelectedNodeIds(currentDoc, request.nodeIds);
       setContextMenu({
         kind: "node",
         nodeId: request.nodeId,
+        nodeIds: validIds.length > 0 ? validIds : [request.nodeId],
         x: request.clientX,
         y: request.clientY,
         renameTarget: "canvas",
@@ -516,10 +639,15 @@ export function DesignObjectWorkspace({
   };
 
   const handleLayerContextMenu = (event: ReactMouseEvent<HTMLDivElement>, node: DesignNode) => {
-    setSelectedId(node.id);
+    const alreadySelected = normalizedSelectedIds.includes(node.id);
+    const targetIds = alreadySelected ? normalizedSelectedIds : [node.id];
+    if (!alreadySelected) {
+      setSelectedIds(targetIds);
+    }
     setContextMenu({
       kind: "node",
       nodeId: node.id,
+      nodeIds: targetIds,
       x: event.clientX,
       y: event.clientY,
       renameTarget: "layers",
@@ -547,22 +675,50 @@ export function DesignObjectWorkspace({
     canvasHandleRef.current?.fitView();
   };
 
-  const handleExportSvg = () => {
-    const rendered = renderDesignToSvg(currentDoc);
-    triggerFileDownload(
-      rendered.svg,
-      "image/svg+xml;charset=utf-8",
-      `${slugifyFilename(activeObject?.title ?? "design")}.svg`,
-    );
-  };
+  const handleExportNodes = (
+    nodeIds: ReadonlyArray<DesignNodeId> | null,
+    format: DesignExportFormat,
+  ) => {
+    const targets = nodeIds === null ? null : normalizeSelectedNodeIds(currentDoc, nodeIds);
+    if (targets !== null && targets.length === 0) return;
 
-  const handleExportHtml = () => {
-    const rendered = renderDesignToHtml(currentDoc);
-    triggerFileDownload(
-      rendered.html,
-      "text/html;charset=utf-8",
-      `${slugifyFilename(activeObject?.title ?? "design")}.html`,
-    );
+    const baseName =
+      targets === null
+        ? slugifyFilename(activeObject?.title ?? "design")
+        : targets.length === 1
+          ? slugifyFilename(currentDoc.nodes[targets[0]!]?.name ?? "component")
+          : `${slugifyFilename(activeObject?.title ?? "design")}-selection`;
+
+    if (format === "png") {
+      const handle = canvasHandleRef.current;
+      if (handle === null) return;
+      void handle
+        .exportNodesToPng(targets, { transparent: targets !== null, scale: 2 })
+        .then((blob) => {
+          if (blob !== null) {
+            triggerBlobDownload(blob, `${baseName}.png`);
+          }
+        })
+        .catch((error: unknown) => {
+          setActionError(error instanceof Error ? error.message : String(error));
+        });
+      return;
+    }
+
+    if (format === "svg") {
+      const rendered =
+        targets === null
+          ? renderDesignToSvg(currentDoc)
+          : renderDesignToSvg(currentDoc, { nodeIds: targets, transparent: true });
+      triggerFileDownload(rendered.svg, "image/svg+xml;charset=utf-8", `${baseName}.svg`);
+      return;
+    }
+
+    const rendered =
+      targets === null
+        ? renderDesignToHtml(currentDoc)
+        : renderDesignToHtml(currentDoc, { nodeIds: targets, transparent: true });
+    triggerFileDownload(rendered.html, "text/html;charset=utf-8", `${baseName}.html`);
   };
 
   const cancelPickMode = () => {
@@ -577,7 +733,7 @@ export function DesignObjectWorkspace({
       cancelPickMode();
     } else {
       setPickActive(true);
-      setSelectedId(null);
+      setSelectedIds([]);
       setSelectionAnchorWorld(null);
       setAskChatNote("");
       workspaceRef.current?.focus({ preventScroll: true });
@@ -586,23 +742,25 @@ export function DesignObjectWorkspace({
 
   const handlePickNode = (id: DesignNodeId | null, anchorWorld: Point2D | null) => {
     if (!pickActive) return;
-    setSelectedId(id);
+    setSelectedIds(id === null ? [] : [id]);
     setSelectionAnchorWorld(anchorWorld);
     setAskChatNote("");
   };
 
-  const handleSelectFromLayers = (id: DesignNodeId | null) => {
-    setSelectedId(id);
+  const handleSelectFromLayers = (ids: ReadonlyArray<DesignNodeId>) => {
+    const nextIds = normalizeSelectedNodeIds(currentDoc, ids);
+    setSelectedIds(nextIds);
     setAskChatNote("");
-    if (id === null || !pickActive) {
+    const singleId = nextIds.length === 1 ? nextIds[0]! : null;
+    if (singleId === null || !pickActive) {
       setSelectionAnchorWorld(null);
       return;
     }
-    const anchor = canvasHandleRef.current?.getNodeAnchorWorld(id) ?? null;
+    const anchor = canvasHandleRef.current?.getNodeAnchorWorld(singleId) ?? null;
     if (anchor !== null) {
       setSelectionAnchorWorld(anchor);
     } else {
-      const node = currentDoc.nodes[id];
+      const node = currentDoc.nodes[singleId];
       setSelectionAnchorWorld(
         node !== undefined ? { x: node.x + node.width / 2, y: node.y + node.height } : null,
       );
@@ -625,7 +783,7 @@ export function DesignObjectWorkspace({
     if (mode === "send") {
       onSendAnnotation?.(annotation, null);
     }
-    setSelectedId(null);
+    setSelectedIds([]);
     cancelPickMode();
   };
 
@@ -651,9 +809,10 @@ export function DesignObjectWorkspace({
     };
   }, [resizingPanel]);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- handles canvas shortcuts (Space pan, tools, nudge, delete, undo/redo) when focused or hovered without interfering with ChatComposer typing
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- handles canvas shortcuts (Space pan, tools, copy/cut/paste, select all, nudge, delete, undo/redo) when focused or hovered without interfering with ChatComposer or inline text editing
   useEffect(() => {
     const canHandleCanvasKeys = () => {
+      if (canvasHandleRef.current?.isEditingText() === true) return false;
       const root = workspaceRef.current;
       if (root === null) return false;
       const active = document.activeElement;
@@ -684,30 +843,37 @@ export function DesignObjectWorkspace({
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") {
-        if (selectedId !== null && !pickActive) {
+        if (normalizedSelectedIds.length > 0 && !pickActive) {
           event.preventDefault();
-          handleDuplicateNode(selectedId);
+          handleDuplicateNodes(normalizedSelectedIds);
+        }
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        if (!pickActive) {
+          event.preventDefault();
+          setSelectedIds(getSelectAllNodeIds(currentDoc, normalizedSelectedIds));
         }
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "F2") {
-        if (selectedId !== null && !pickActive) {
+        if (primarySelectedId !== null && !pickActive) {
           event.preventDefault();
-          canvasHandleRef.current?.startRename(selectedId);
+          canvasHandleRef.current?.startRename(primarySelectedId);
         }
         return;
       }
       if (event.key === "Escape") {
         if (pickActive) {
           setPickActive(false);
-          setSelectedId(null);
+          setSelectedIds([]);
           setSelectionAnchorWorld(null);
           setAskChatNote("");
         } else if (tool !== "select") {
           setTool("select");
         } else {
-          setSelectedId(null);
+          setSelectedIds([]);
         }
         return;
       }
@@ -741,52 +907,63 @@ export function DesignObjectWorkspace({
           setTool("line");
           break;
         case "arrowup":
-          if (selectedNode !== undefined && selectedNode.locked !== true) {
+          if (normalizedSelectedIds.length > 0) {
             event.preventDefault();
-            handlePatchNode(
-              selectedNode.id,
-              { y: selectedNode.y - step },
-              `Nudged ${selectedNode.name}`,
-            );
+            handleNudgeNodes(0, -step);
           }
           break;
         case "arrowdown":
-          if (selectedNode !== undefined && selectedNode.locked !== true) {
+          if (normalizedSelectedIds.length > 0) {
             event.preventDefault();
-            handlePatchNode(
-              selectedNode.id,
-              { y: selectedNode.y + step },
-              `Nudged ${selectedNode.name}`,
-            );
+            handleNudgeNodes(0, step);
           }
           break;
         case "arrowleft":
-          if (selectedNode !== undefined && selectedNode.locked !== true) {
+          if (normalizedSelectedIds.length > 0) {
             event.preventDefault();
-            handlePatchNode(
-              selectedNode.id,
-              { x: selectedNode.x - step },
-              `Nudged ${selectedNode.name}`,
-            );
+            handleNudgeNodes(-step, 0);
           }
           break;
         case "arrowright":
-          if (selectedNode !== undefined && selectedNode.locked !== true) {
+          if (normalizedSelectedIds.length > 0) {
             event.preventDefault();
-            handlePatchNode(
-              selectedNode.id,
-              { x: selectedNode.x + step },
-              `Nudged ${selectedNode.name}`,
-            );
+            handleNudgeNodes(step, 0);
           }
           break;
         case "backspace":
         case "delete":
-          if (selectedId !== null) {
+          if (normalizedSelectedIds.length > 0) {
             event.preventDefault();
-            handleDeleteNode(selectedId);
+            handleDeleteNodes(normalizedSelectedIds);
           }
           break;
+      }
+    };
+    const onCopy = (event: ClipboardEvent) => {
+      if (isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) return;
+      if (normalizedSelectedIds.length === 0) return;
+      const serialized = handleCopyNodes(normalizedSelectedIds);
+      if (serialized !== null) {
+        event.preventDefault();
+        event.clipboardData?.setData("text/plain", serialized);
+      }
+    };
+    const onCut = (event: ClipboardEvent) => {
+      if (isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) return;
+      if (normalizedSelectedIds.length === 0) return;
+      const serialized = handleCutNodes(normalizedSelectedIds);
+      if (serialized !== null) {
+        event.preventDefault();
+        event.clipboardData?.setData("text/plain", serialized);
+      }
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      if (isEditableTarget(event.target) || !canHandleCanvasKeys() || pickActive) return;
+      const clipboardText = event.clipboardData?.getData("text/plain") ?? "";
+      const parsed = parseDesignClipboard(clipboardText);
+      if (parsed !== null || sharedDesignClipboard !== null) {
+        event.preventDefault();
+        handlePaste({ clipboardText });
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -798,10 +975,16 @@ export function DesignObjectWorkspace({
       setSpacePressed(false);
     };
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("copy", onCopy);
+    window.addEventListener("cut", onCut);
+    window.addEventListener("paste", onPaste);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onWindowBlur);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("copy", onCopy);
+      window.removeEventListener("cut", onCut);
+      window.removeEventListener("paste", onPaste);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onWindowBlur);
     };
@@ -999,18 +1182,47 @@ export function DesignObjectWorkspace({
           </TooltipPopup>
         </Tooltip>
         <MenuPopup align="end" width="content">
-          <MenuItem onClick={handleExportSvg}>
+          <MenuItem onClick={() => handleExportNodes(null, "png")}>
             <ImageIcon />
+            <span>
+              <T>Export PNG (2x)</T>
+            </span>
+          </MenuItem>
+          <MenuItem onClick={() => handleExportNodes(null, "svg")}>
+            <ShapesIcon />
             <span>
               <T>Export SVG (Figma)</T>
             </span>
           </MenuItem>
-          <MenuItem onClick={handleExportHtml}>
+          <MenuItem onClick={() => handleExportNodes(null, "html")}>
             <FileCodeIcon />
             <span>
               <T>Export HTML</T>
             </span>
           </MenuItem>
+          {normalizedSelectedIds.length > 0 ? (
+            <>
+              <MenuSeparator />
+              <MenuItem onClick={() => handleExportNodes(normalizedSelectedIds, "png")}>
+                <ImageIcon />
+                <span>
+                  <T>Export selection as PNG</T>
+                </span>
+              </MenuItem>
+              <MenuItem onClick={() => handleExportNodes(normalizedSelectedIds, "svg")}>
+                <ShapesIcon />
+                <span>
+                  <T>Export selection as SVG</T>
+                </span>
+              </MenuItem>
+              <MenuItem onClick={() => handleExportNodes(normalizedSelectedIds, "html")}>
+                <FileCodeIcon />
+                <span>
+                  <T>Export selection as HTML</T>
+                </span>
+              </MenuItem>
+            </>
+          ) : null}
         </MenuPopup>
       </Menu>
 
@@ -1235,14 +1447,14 @@ export function DesignObjectWorkspace({
             <DesignLayersPanel
               doc={currentDoc}
               width={leftWidth}
-              selectedId={selectedId}
+              selectedIds={normalizedSelectedIds}
               renamingId={renamingLayerId}
               currentRevision={activeObject.revision}
               revisions={revisions}
               revisionsLoading={revisionsLoading}
               activeTab={leftTab}
               onTabChange={setLeftTab}
-              onSelect={handleSelectFromLayers}
+              onSelectIds={handleSelectFromLayers}
               onStartRename={setRenamingLayerId}
               onRename={handleRenameNode}
               onCancelRename={() => setRenamingLayerId(null)}
@@ -1261,7 +1473,7 @@ export function DesignObjectWorkspace({
                   `${node.locked === true ? "Unlocked" : "Locked"} ${node.name}`,
                 )
               }
-              onDelete={handleDeleteNode}
+              onDelete={(id) => handleDeleteNodes([id])}
               onRestoreRevision={(rev) => restoreRevision(rev, null)}
             />
             <div
@@ -1279,7 +1491,7 @@ export function DesignObjectWorkspace({
         <DesignCanvasViewport
           doc={currentDoc}
           tool={tool}
-          selectedId={selectedId}
+          selectedIds={normalizedSelectedIds}
           pickActive={pickActive}
           selectionAnchorWorld={selectionAnchorWorld}
           selectionOverlay={selectionOverlay}
@@ -1288,7 +1500,7 @@ export function DesignObjectWorkspace({
           handleRef={canvasHandleRef}
           onViewportChange={setViewport}
           onViewportSizeChange={setViewportSize}
-          onSelect={setSelectedId}
+          onSelectIds={setSelectedIds}
           onPickNode={handlePickNode}
           onAddNode={handleAddNode}
           onCommitOps={commitOps}
@@ -1313,7 +1525,7 @@ export function DesignObjectWorkspace({
             <DesignInspectorPanel
               doc={currentDoc}
               width={rightWidth}
-              selectedId={selectedId}
+              selectedIds={normalizedSelectedIds}
               onPatchNode={handlePatchNode}
               onSetBackground={(background) =>
                 commitOps(
@@ -1324,6 +1536,7 @@ export function DesignObjectWorkspace({
                 )
               }
               onDetachFromParent={handleDetachFromInspector}
+              onExportNodes={handleExportNodes}
             />
           </>
         ) : null}
@@ -1339,12 +1552,18 @@ export function DesignObjectWorkspace({
         if (contextMenu.kind === "node") {
           const menuNode = currentDoc.nodes[contextMenu.nodeId];
           if (menuNode === undefined) return null;
+          const menuNodeIds = normalizeSelectedNodeIds(currentDoc, contextMenu.nodeIds);
+          const targetIds = menuNodeIds.length > 0 ? menuNodeIds : [menuNode.id];
+          const isSingleTarget = targetIds.length === 1;
           const parent =
             menuNode.parentId === null ? undefined : currentDoc.nodes[menuNode.parentId];
           const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
           const order = getLayerOrderAvailability(currentDoc, menuNode.id);
-          const isHidden = menuNode.visible === false;
-          const isLocked = menuNode.locked === true;
+          const targetNodes = targetIds
+            .map((id) => currentDoc.nodes[id])
+            .filter((item): item is DesignNode => item !== undefined);
+          const allHidden = targetNodes.every((item) => item.visible === false);
+          const allLocked = targetNodes.every((item) => item.locked === true);
 
           return (
             <Menu
@@ -1364,107 +1583,201 @@ export function DesignObjectWorkspace({
               >
                 <MenuItem
                   onClick={() => {
-                    const target = contextMenu.renameTarget;
                     setContextMenu(null);
-                    if (target === "layers") {
-                      setRenamingLayerId(menuNode.id);
-                    } else {
-                      canvasHandleRef.current?.startRename(menuNode.id);
-                    }
+                    handleCopyNodes(targetIds);
                   }}
                 >
-                  <PencilIcon className="size-3.5" />
+                  <CopyIcon className="size-3.5" />
                   <span>
-                    <T>Rename</T>
+                    <T>Copy</T>
                   </span>
-                  <MenuShortcut>F2</MenuShortcut>
+                  <MenuShortcut>{isMac ? "⌘C" : "Ctrl+C"}</MenuShortcut>
                 </MenuItem>
                 <MenuItem
                   onClick={() => {
                     setContextMenu(null);
-                    handleDuplicateNode(menuNode.id);
+                    handleCutNodes(targetIds);
                   }}
                 >
-                  <CopyIcon className="size-3.5" />
+                  <ScissorsIcon className="size-3.5" />
+                  <span>
+                    <T>Cut</T>
+                  </span>
+                  <MenuShortcut>{isMac ? "⌘X" : "Ctrl+X"}</MenuShortcut>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setContextMenu(null);
+                    handlePaste();
+                  }}
+                >
+                  <ClipboardPasteIcon className="size-3.5" />
+                  <span>
+                    <T>Paste</T>
+                  </span>
+                  <MenuShortcut>{isMac ? "⌘V" : "Ctrl+V"}</MenuShortcut>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setContextMenu(null);
+                    handleDuplicateNodes(targetIds);
+                  }}
+                >
+                  <CopyPlusIcon className="size-3.5" />
                   <span>
                     <T>Duplicate</T>
                   </span>
                   <MenuShortcut>{isMac ? "⌘D" : "Ctrl+D"}</MenuShortcut>
                 </MenuItem>
+                {isSingleTarget ? (
+                  <MenuItem
+                    onClick={() => {
+                      const target = contextMenu.renameTarget;
+                      setContextMenu(null);
+                      if (target === "layers") {
+                        setRenamingLayerId(menuNode.id);
+                      } else {
+                        canvasHandleRef.current?.startRename(menuNode.id);
+                      }
+                    }}
+                  >
+                    <PencilIcon className="size-3.5" />
+                    <span>
+                      <T>Rename</T>
+                    </span>
+                    <MenuShortcut>F2</MenuShortcut>
+                  </MenuItem>
+                ) : null}
 
                 <MenuSeparator />
 
                 <MenuSub>
-                  <MenuSubTrigger disabled={!order.canBringForward && !order.canSendBackward}>
-                    <LayersIcon className="size-3.5" />
+                  <MenuSubTrigger>
+                    <DownloadIcon className="size-3.5" />
                     <span>
-                      <T>Arrange</T>
+                      {isSingleTarget ? (
+                        <T>Download</T>
+                      ) : (
+                        <T>
+                          Download (<Var>{targetIds.length}</Var>)
+                        </T>
+                      )}
                     </span>
                   </MenuSubTrigger>
                   <MenuSubPopup>
                     <MenuItem
-                      disabled={!order.canBringForward}
                       onClick={() => {
                         setContextMenu(null);
-                        handleReorderNode(menuNode.id, "front");
+                        handleExportNodes(targetIds, "png");
                       }}
                     >
-                      <ArrowUpToLineIcon className="size-3.5" />
+                      <ImageIcon className="size-3.5" />
                       <span>
-                        <T>Bring to front</T>
+                        <T>Download PNG (2x)</T>
                       </span>
                     </MenuItem>
                     <MenuItem
-                      disabled={!order.canBringForward}
                       onClick={() => {
                         setContextMenu(null);
-                        handleReorderNode(menuNode.id, "forward");
+                        handleExportNodes(targetIds, "svg");
                       }}
                     >
-                      <ArrowUpIcon className="size-3.5" />
+                      <ShapesIcon className="size-3.5" />
                       <span>
-                        <T>Bring forward</T>
+                        <T>Download SVG (Figma)</T>
                       </span>
                     </MenuItem>
                     <MenuItem
-                      disabled={!order.canSendBackward}
                       onClick={() => {
                         setContextMenu(null);
-                        handleReorderNode(menuNode.id, "backward");
+                        handleExportNodes(targetIds, "html");
                       }}
                     >
-                      <ArrowDownIcon className="size-3.5" />
+                      <FileCodeIcon className="size-3.5" />
                       <span>
-                        <T>Send backward</T>
-                      </span>
-                    </MenuItem>
-                    <MenuItem
-                      disabled={!order.canSendBackward}
-                      onClick={() => {
-                        setContextMenu(null);
-                        handleReorderNode(menuNode.id, "back");
-                      }}
-                    >
-                      <ArrowDownToLineIcon className="size-3.5" />
-                      <span>
-                        <T>Send to back</T>
+                        <T>Download HTML</T>
                       </span>
                     </MenuItem>
                   </MenuSubPopup>
                 </MenuSub>
 
-                {inAutoLayoutParent ? (
-                  <MenuItem
-                    onClick={() => {
-                      setContextMenu(null);
-                      handleDetachFromInspector(menuNode);
-                    }}
-                  >
-                    <Unlink2Icon className="size-3.5" />
-                    <span>
-                      <T>Detach from Auto Layout</T>
-                    </span>
-                  </MenuItem>
+                {isSingleTarget ? (
+                  <>
+                    <MenuSeparator />
+
+                    <MenuSub>
+                      <MenuSubTrigger disabled={!order.canBringForward && !order.canSendBackward}>
+                        <LayersIcon className="size-3.5" />
+                        <span>
+                          <T>Arrange</T>
+                        </span>
+                      </MenuSubTrigger>
+                      <MenuSubPopup>
+                        <MenuItem
+                          disabled={!order.canBringForward}
+                          onClick={() => {
+                            setContextMenu(null);
+                            handleReorderNode(menuNode.id, "front");
+                          }}
+                        >
+                          <ArrowUpToLineIcon className="size-3.5" />
+                          <span>
+                            <T>Bring to front</T>
+                          </span>
+                        </MenuItem>
+                        <MenuItem
+                          disabled={!order.canBringForward}
+                          onClick={() => {
+                            setContextMenu(null);
+                            handleReorderNode(menuNode.id, "forward");
+                          }}
+                        >
+                          <ArrowUpIcon className="size-3.5" />
+                          <span>
+                            <T>Bring forward</T>
+                          </span>
+                        </MenuItem>
+                        <MenuItem
+                          disabled={!order.canSendBackward}
+                          onClick={() => {
+                            setContextMenu(null);
+                            handleReorderNode(menuNode.id, "backward");
+                          }}
+                        >
+                          <ArrowDownIcon className="size-3.5" />
+                          <span>
+                            <T>Send backward</T>
+                          </span>
+                        </MenuItem>
+                        <MenuItem
+                          disabled={!order.canSendBackward}
+                          onClick={() => {
+                            setContextMenu(null);
+                            handleReorderNode(menuNode.id, "back");
+                          }}
+                        >
+                          <ArrowDownToLineIcon className="size-3.5" />
+                          <span>
+                            <T>Send to back</T>
+                          </span>
+                        </MenuItem>
+                      </MenuSubPopup>
+                    </MenuSub>
+
+                    {inAutoLayoutParent ? (
+                      <MenuItem
+                        onClick={() => {
+                          setContextMenu(null);
+                          handleDetachFromInspector(menuNode);
+                        }}
+                      >
+                        <Unlink2Icon className="size-3.5" />
+                        <span>
+                          <T>Detach from Auto Layout</T>
+                        </span>
+                      </MenuItem>
+                    ) : null}
+                  </>
                 ) : null}
 
                 <MenuSeparator />
@@ -1472,39 +1785,51 @@ export function DesignObjectWorkspace({
                 <MenuItem
                   onClick={() => {
                     setContextMenu(null);
-                    handlePatchNode(
-                      menuNode.id,
-                      { visible: isHidden },
-                      `${isHidden ? "Shown" : "Hidden"} ${menuNode.name}`,
+                    const nextVisible = allHidden;
+                    commitOps(
+                      targetIds.map((id) => ({
+                        op: "update",
+                        id,
+                        patch: { visible: nextVisible },
+                      })),
+                      isSingleTarget
+                        ? `${nextVisible ? "Shown" : "Hidden"} ${menuNode.name}`
+                        : `${nextVisible ? "Shown" : "Hidden"} ${targetIds.length} layers`,
                     );
                   }}
                 >
-                  {isHidden ? (
+                  {allHidden ? (
                     <EyeIcon className="size-3.5" />
                   ) : (
                     <EyeOffIcon className="size-3.5" />
                   )}
-                  <span>{isHidden ? <T>Show</T> : <T>Hide</T>}</span>
+                  <span>{allHidden ? <T>Show</T> : <T>Hide</T>}</span>
                 </MenuItem>
                 <MenuItem
                   onClick={() => {
                     setContextMenu(null);
-                    handlePatchNode(
-                      menuNode.id,
-                      { locked: !isLocked },
-                      `${isLocked ? "Unlocked" : "Locked"} ${menuNode.name}`,
+                    const nextLocked = !allLocked;
+                    commitOps(
+                      targetIds.map((id) => ({
+                        op: "update",
+                        id,
+                        patch: { locked: nextLocked },
+                      })),
+                      isSingleTarget
+                        ? `${nextLocked ? "Locked" : "Unlocked"} ${menuNode.name}`
+                        : `${nextLocked ? "Locked" : "Unlocked"} ${targetIds.length} layers`,
                     );
                   }}
                 >
-                  {isLocked ? (
+                  {allLocked ? (
                     <UnlockIcon className="size-3.5" />
                   ) : (
                     <LockIcon className="size-3.5" />
                   )}
-                  <span>{isLocked ? <T>Unlock</T> : <T>Lock</T>}</span>
+                  <span>{allLocked ? <T>Unlock</T> : <T>Lock</T>}</span>
                 </MenuItem>
 
-                {threadRef !== undefined ? (
+                {isSingleTarget && threadRef !== undefined ? (
                   <>
                     <MenuSeparator />
                     <MenuItem
@@ -1527,12 +1852,18 @@ export function DesignObjectWorkspace({
                   variant="destructive"
                   onClick={() => {
                     setContextMenu(null);
-                    handleDeleteNode(menuNode.id);
+                    handleDeleteNodes(targetIds);
                   }}
                 >
                   <Trash2Icon className="size-3.5" />
                   <span>
-                    <T>Delete</T>
+                    {isSingleTarget ? (
+                      <T>Delete</T>
+                    ) : (
+                      <T>
+                        Delete (<Var>{targetIds.length}</Var>)
+                      </T>
+                    )}
                   </span>
                   <MenuShortcut>{isMac ? "⌫" : gt("Del")}</MenuShortcut>
                 </MenuItem>
@@ -1560,6 +1891,33 @@ export function DesignObjectWorkspace({
               finalFocus={false}
               onContextMenu={(event) => event.preventDefault()}
             >
+              <MenuItem
+                onClick={() => {
+                  setContextMenu(null);
+                  handlePaste({ pasteAt: { x: originX, y: originY } });
+                }}
+              >
+                <ClipboardPasteIcon className="size-3.5" />
+                <span>
+                  <T>Paste here</T>
+                </span>
+                <MenuShortcut>{isMac ? "⌘V" : "Ctrl+V"}</MenuShortcut>
+              </MenuItem>
+              <MenuItem
+                disabled={currentDoc.rootIds.length === 0}
+                onClick={() => {
+                  setContextMenu(null);
+                  setSelectedIds(getSelectAllNodeIds(currentDoc, normalizedSelectedIds));
+                }}
+              >
+                <MousePointer2Icon className="size-3.5" />
+                <span>
+                  <T>Select all</T>
+                </span>
+                <MenuShortcut>{isMac ? "⌘A" : "Ctrl+A"}</MenuShortcut>
+              </MenuItem>
+
+              <MenuSeparator />
               <MenuItem
                 onClick={() => {
                   setContextMenu(null);

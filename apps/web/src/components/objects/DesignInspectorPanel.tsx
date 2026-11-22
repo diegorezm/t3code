@@ -5,8 +5,15 @@ import type {
   DesignNodeId,
   DesignNodePatch,
 } from "@t3tools/contracts";
-import { T, useGT } from "gt-react";
-import { AlignCenterIcon, AlignLeftIcon, AlignRightIcon, Unlink2Icon, XIcon } from "lucide-react";
+import { T, useGT, Var } from "gt-react";
+import {
+  AlignCenterIcon,
+  AlignLeftIcon,
+  AlignRightIcon,
+  DownloadIcon,
+  Unlink2Icon,
+  XIcon,
+} from "lucide-react";
 
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -111,25 +118,57 @@ function ColorField({
   );
 }
 
+export type DesignExportFormat = "png" | "svg" | "html";
+
+function ExportSection({ onExport }: { readonly onExport: (format: DesignExportFormat) => void }) {
+  return (
+    <div className="flex flex-col gap-2 border-t border-border/60 pt-3">
+      <div className="flex items-center gap-1.5 text-2xs text-muted-foreground">
+        <DownloadIcon className="size-3" />
+        <span>
+          <T>Export</T>
+        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-1.5">
+        <Button size="xs" variant="outline" onClick={() => onExport("png")}>
+          PNG
+        </Button>
+        <Button size="xs" variant="outline" onClick={() => onExport("svg")}>
+          SVG
+        </Button>
+        <Button size="xs" variant="outline" onClick={() => onExport("html")}>
+          HTML
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function DesignInspectorPanel({
   doc,
   width,
-  selectedId,
+  selectedIds,
   onPatchNode,
   onSetBackground,
   onDetachFromParent,
+  onExportNodes,
 }: {
   readonly doc: DesignDocument;
   readonly width: number;
-  readonly selectedId: DesignNodeId | null;
+  readonly selectedIds: ReadonlyArray<DesignNodeId>;
   readonly onPatchNode: (id: DesignNodeId, patch: DesignNodePatch, summary: string) => void;
   readonly onSetBackground: (background: string | null) => void;
   readonly onDetachFromParent: (node: DesignNode) => void;
+  readonly onExportNodes?:
+    | ((nodeIds: ReadonlyArray<DesignNodeId>, format: DesignExportFormat) => void)
+    | undefined;
 }) {
   const gt = useGT();
-  const node = selectedId === null ? undefined : doc.nodes[selectedId];
+  const selectedNodes = selectedIds
+    .map((id) => doc.nodes[id])
+    .filter((item): item is DesignNode => item !== undefined);
 
-  if (node === undefined) {
+  if (selectedNodes.length === 0) {
     return (
       <div
         className="flex h-full shrink-0 flex-col border-l border-border/60 bg-background"
@@ -153,6 +192,32 @@ export function DesignInspectorPanel({
       </div>
     );
   }
+
+  if (selectedNodes.length > 1) {
+    const validIds = selectedNodes.map((item) => item.id);
+    return (
+      <div
+        className="flex h-full shrink-0 flex-col border-l border-border/60 bg-background"
+        style={{ width }}
+      >
+        <div className="flex h-9 shrink-0 items-center border-b border-border/60 px-3 text-xs font-medium text-foreground">
+          <T>
+            <Var>{selectedNodes.length}</Var> layers selected
+          </T>
+        </div>
+        <div className="flex flex-col gap-3 p-3">
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            <T>Use arrow keys to nudge, copy/paste, duplicate, or export the selection.</T>
+          </p>
+          {onExportNodes !== undefined ? (
+            <ExportSection onExport={(format) => onExportNodes(validIds, format)} />
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  const node = selectedNodes[0]!;
 
   const parent = node.parentId === null ? undefined : doc.nodes[node.parentId];
   const inAutoLayoutParent = parent?.type === "frame" && parent.layout !== undefined;
@@ -449,6 +514,10 @@ export function DesignInspectorPanel({
                 </div>
               </div>
             </div>
+          ) : null}
+
+          {onExportNodes !== undefined ? (
+            <ExportSection onExport={(format) => onExportNodes([node.id], format)} />
           ) : null}
         </div>
       </ScrollArea>

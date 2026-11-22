@@ -9,8 +9,10 @@ import type {
 
 export interface DesignRenderOptions {
   readonly frameId?: DesignNodeId | undefined;
+  readonly nodeIds?: ReadonlyArray<DesignNodeId> | undefined;
   readonly padding?: number | undefined;
   readonly maxWidth?: number | undefined;
+  readonly transparent?: boolean | undefined;
 }
 
 export interface DesignRenderResult {
@@ -269,26 +271,213 @@ function renderNodeHtml(
   }
 }
 
+interface ResolvedNodeBox {
+  readonly node: DesignNode;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+function isDescendantInDoc(
+  doc: DesignDocument,
+  candidateAncestorId: string,
+  nodeId: string,
+): boolean {
+  let cursor = doc.nodes[nodeId];
+  while (cursor !== undefined) {
+    if (cursor.parentId === candidateAncestorId) return true;
+    if (cursor.parentId === null) return false;
+    cursor = doc.nodes[cursor.parentId];
+  }
+  return false;
+}
+
+function layoutChildrenInFrame(
+  doc: DesignDocument,
+  frame: Extract<DesignNode, { readonly type: "frame" }>,
+  frameX: number,
+  frameY: number,
+  frameW: number,
+  frameH: number,
+): ReadonlyArray<ResolvedNodeBox> {
+  if (frame.layout === undefined) {
+    const out: Array<ResolvedNodeBox> = [];
+    for (const childId of frame.childIds) {
+      const child = doc.nodes[childId];
+      if (child === undefined || child.visible === false) continue;
+      out.push({
+        node: child,
+        x: frameX + child.x,
+        y: frameY + child.y,
+        width: child.width,
+        height: child.height,
+      });
+    }
+    return out;
+  }
+
+  const pad = normalizeBoxPadding(frame.layout.padding);
+  const gap = frame.layout.gap ?? 0;
+  const innerW = Math.max(0, frameW - pad.left - pad.right);
+  const innerH = Math.max(0, frameH - pad.top - pad.bottom);
+  const isRow = frame.layout.direction === "horizontal";
+
+  const visibleChildren = frame.childIds
+    .map((id) => doc.nodes[id])
+    .filter((child): child is DesignNode => child !== undefined && child.visible !== false);
+
+  const fillCount = visibleChildren.filter((child) =>
+    isRow ? child.widthMode === "fill" : child.heightMode === "fill",
+  ).length;
+  const fixedTotal = visibleChildren.reduce((acc, child) => {
+    const isFill = isRow ? child.widthMode === "fill" : child.heightMode === "fill";
+    return acc + (isFill ? 0 : isRow ? child.width : child.height);
+  }, 0);
+  const totalGap = Math.max(0, visibleChildren.length - 1) * gap;
+  const remaining = Math.max(0, (isRow ? innerW : innerH) - fixedTotal - totalGap);
+  const fillSize = fillCount > 0 ? remaining / fillCount : 0;
+
+  let cursor = isRow ? frameX + pad.left : frameY + pad.top;
+  const out: Array<ResolvedNodeBox> = [];
+  for (const child of visibleChildren) {
+    const childW = isRow
+      ? child.widthMode === "fill"
+        ? fillSize
+        : child.width
+      : child.widthMode === "fill" || frame.layout.alignItems === "stretch"
+        ? innerW
+        : child.width;
+    const childH = !isRow
+      ? child.heightMode === "fill"
+        ? fillSize
+        : child.height
+      : child.heightMode === "fill" || frame.layout.alignItems === "stretch"
+        ? innerH
+        : child.height;
+
+    let childX = isRow ? cursor : frameX + pad.left;
+    let childY = isRow ? frameY + pad.top : cursor;
+
+    if (!isRow) {
+      if (frame.layout.alignItems === "center") childX = frameX + pad.left + (innerW - childW) / 2;
+      else if (frame.layout.alignItems === "end") childX = frameX + frameW - pad.right - childW;
+    } else {
+      if (frame.layout.alignItems === "center") childY = frameY + pad.top + (innerH - childH) / 2;
+      else if (frame.layout.alignItems === "end") childY = frameY + frameH - pad.bottom - childH;
+    }
+
+    out.push({ node: child, x: childX, y: childY, width: childW, height: childH });
+    cursor += (isRow ? childW : childH) + gap;
+  }
+  return out;
+}
+
+function computeAllNodeWorldBoxes(doc: DesignDocument): Map<string, ResolvedNodeBox> {
+  const boxes = new Map<string, ResolvedNodeBox>();
+  const visit = (box: ResolvedNodeBox) => {
+    boxes.set(box.node.id, box);
+    if (box.node.type === "frame") {
+      for (const childBox of layoutChildrenInFrame(
+        doc,
+        box.node,
+        box.x,
+        box.y,
+        box.width,
+        box.height,
+      )) {
+        visit(childBox);
+      }
+    }
+  };
+  for (const rootId of doc.rootIds) {
+    const root = doc.nodes[rootId];
+    if (root === undefined || root.visible === false) continue;
+    visit({ node: root, x: root.x, y: root.y, width: root.width, height: root.height });
+  }
+  return boxes;
+}
+
+function resolveExportTargets(
+  doc: DesignDocument,
+  nodeIds: ReadonlyArray<DesignNodeId>,
+): ReadonlyArray<ResolvedNodeBox> {
+  const uniqueIds: Array<DesignNodeId> = [];
+  const seen = new Set<string>();
+  for (const id of nodeIds) {
+    if (seen.has(id) || !(id in doc.nodes)) continue;
+    seen.add(id);
+    uniqueIds.push(id);
+  }
+  const topIds = uniqueIds.filter(
+    (id) => !uniqueIds.some((other) => other !== id && isDescendantInDoc(doc, other, id)),
+  );
+  if (topIds.length === 0) return [];
+  const worldBoxes = computeAllNodeWorldBoxes(doc);
+  const resolved: Array<ResolvedNodeBox> = [];
+  for (const id of topIds) {
+    const box = worldBoxes.get(id);
+    if (box !== undefined) {
+      resolved.push(box);
+      continue;
+    }
+    const fallback = doc.nodes[id];
+    if (fallback !== undefined) {
+      resolved.push({
+        node: fallback,
+        x: fallback.x,
+        y: fallback.y,
+        width: fallback.width,
+        height: fallback.height,
+      });
+    }
+  }
+  return resolved;
+}
+
 export function renderDesignToHtml(
   doc: DesignDocument,
   options: DesignRenderOptions = {},
 ): DesignRenderResult {
   const padding = options.padding ?? 24;
-  const background = sanitizeCssValue(doc.background ?? DEFAULT_CANVAS_BG);
+  const background =
+    options.transparent === true
+      ? "transparent"
+      : sanitizeCssValue(doc.background ?? DEFAULT_CANVAS_BG);
 
-  if (options.frameId !== undefined) {
-    const target = doc.nodes[options.frameId];
-    if (target !== undefined) {
-      const rawWidth = Math.max(1, Math.round(target.width));
-      const rawHeight = Math.max(1, Math.round(target.height));
+  const requestedIds =
+    options.nodeIds !== undefined && options.nodeIds.length > 0
+      ? options.nodeIds
+      : options.frameId !== undefined
+        ? [options.frameId]
+        : null;
+
+  if (requestedIds !== null) {
+    const targets = resolveExportTargets(doc, requestedIds);
+    if (targets.length === 1) {
+      const targetBox = targets[0]!;
+      const target = targetBox.node;
+      const rawWidth = Math.max(1, Math.round(targetBox.width));
+      const rawHeight = Math.max(1, Math.round(targetBox.height));
       const maxWidth = Math.min(
         MAX_RENDER_WIDTH,
         Math.max(MIN_RENDER_WIDTH, options.maxWidth ?? MAX_RENDER_WIDTH),
       );
       const scale = rawWidth > maxWidth ? maxWidth / rawWidth : 1;
-      const width = Math.max(MIN_RENDER_WIDTH, Math.round(rawWidth * scale));
-      const height = Math.max(80, Math.round(rawHeight * scale));
-      const nodeHtml = renderNodeHtml(doc, target, false, target.x, target.y);
+      const width =
+        options.nodeIds !== undefined
+          ? Math.max(1, Math.round(rawWidth * scale))
+          : Math.max(MIN_RENDER_WIDTH, Math.round(rawWidth * scale));
+      const height =
+        options.nodeIds !== undefined
+          ? Math.max(1, Math.round(rawHeight * scale))
+          : Math.max(80, Math.round(rawHeight * scale));
+      const sizedTarget: DesignNode = {
+        ...target,
+        width: targetBox.width,
+        height: targetBox.height,
+      };
+      const nodeHtml = renderNodeHtml(doc, sizedTarget, false, target.x, target.y);
       const html = `<!doctype html>
 <html>
 <head>
@@ -304,6 +493,54 @@ export function renderDesignToHtml(
 </body>
 </html>`;
       return { html, width, height, frameId: target.id };
+    }
+    if (targets.length > 1) {
+      const selectionPadding = options.padding ?? 0;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const box of targets) {
+        minX = Math.min(minX, box.x);
+        minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.width);
+        maxY = Math.max(maxY, box.y + box.height);
+      }
+      const rawWidth = Math.max(1, Math.round(maxX - minX + selectionPadding * 2));
+      const rawHeight = Math.max(1, Math.round(maxY - minY + selectionPadding * 2));
+      const maxWidth = Math.min(
+        MAX_RENDER_WIDTH,
+        Math.max(MIN_RENDER_WIDTH, options.maxWidth ?? MAX_RENDER_WIDTH),
+      );
+      const scale = rawWidth > maxWidth ? maxWidth / rawWidth : 1;
+      const width = Math.max(1, Math.round(rawWidth * scale));
+      const height = Math.max(1, Math.round(rawHeight * scale));
+      const nodesHtml = targets
+        .map((box) =>
+          renderNodeHtml(
+            doc,
+            { ...box.node, x: box.x, y: box.y, width: box.width, height: box.height },
+            false,
+            minX - selectionPadding,
+            minY - selectionPadding,
+          ),
+        )
+        .join("");
+      const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: ${background}; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .stage { position: relative; width: ${width}px; height: ${height}px; overflow: hidden; background: ${background}; }
+  .scaler { position: absolute; left: 0; top: 0; width: ${rawWidth}px; height: ${rawHeight}px; transform-origin: top left; transform: scale(${scale}); }
+</style>
+</head>
+<body>
+  <div class="stage"><div class="scaler">${nodesHtml}</div></div>
+</body>
+</html>`;
+      return { html, width, height, frameId: null };
     }
   }
 
@@ -481,69 +718,17 @@ function renderNodeSvg(
         clipAttr = ` clip-path="url(#${clipId})"`;
       }
 
-      const childrenSvg: Array<string> = [];
-      if (node.layout !== undefined) {
-        const pad = normalizeBoxPadding(node.layout.padding);
-        const gap = node.layout.gap ?? 0;
-        const innerW = Math.max(0, width - pad.left - pad.right);
-        const innerH = Math.max(0, height - pad.top - pad.bottom);
-        const isRow = node.layout.direction === "horizontal";
-        let cursor = isRow ? x + pad.left : y + pad.top;
-
-        const visibleChildren = node.childIds
-          .map((id) => doc.nodes[id])
-          .filter((child): child is DesignNode => child !== undefined && child.visible !== false);
-
-        const fillCount = visibleChildren.filter((child) =>
-          isRow ? child.widthMode === "fill" : child.heightMode === "fill",
-        ).length;
-        const fixedTotal = visibleChildren.reduce((acc, child) => {
-          const isFill = isRow ? child.widthMode === "fill" : child.heightMode === "fill";
-          return acc + (isFill ? 0 : isRow ? child.width : child.height);
-        }, 0);
-        const totalGap = Math.max(0, visibleChildren.length - 1) * gap;
-        const remaining = Math.max(0, (isRow ? innerW : innerH) - fixedTotal - totalGap);
-        const fillSize = fillCount > 0 ? remaining / fillCount : 0;
-
-        for (const child of visibleChildren) {
-          const childW = isRow
-            ? child.widthMode === "fill"
-              ? fillSize
-              : child.width
-            : child.widthMode === "fill" || node.layout.alignItems === "stretch"
-              ? innerW
-              : child.width;
-          const childH = !isRow
-            ? child.heightMode === "fill"
-              ? fillSize
-              : child.height
-            : child.heightMode === "fill" || node.layout.alignItems === "stretch"
-              ? innerH
-              : child.height;
-
-          let childX = isRow ? cursor : x + pad.left;
-          let childY = isRow ? y + pad.top : cursor;
-
-          if (!isRow) {
-            if (node.layout.alignItems === "center") childX = x + pad.left + (innerW - childW) / 2;
-            else if (node.layout.alignItems === "end") childX = x + width - pad.right - childW;
-          } else {
-            if (node.layout.alignItems === "center") childY = y + pad.top + (innerH - childH) / 2;
-            else if (node.layout.alignItems === "end") childY = y + height - pad.bottom - childH;
-          }
-
-          childrenSvg.push(renderNodeSvg(doc, child, childX, childY, childW, childH, defs));
-          cursor += (isRow ? childW : childH) + gap;
-        }
-      } else {
-        for (const childId of node.childIds) {
-          const child = doc.nodes[childId];
-          if (child === undefined) continue;
-          childrenSvg.push(
-            renderNodeSvg(doc, child, x + child.x, y + child.y, child.width, child.height, defs),
-          );
-        }
-      }
+      const childrenSvg = layoutChildrenInFrame(doc, node, x, y, width, height).map((childBox) =>
+        renderNodeSvg(
+          doc,
+          childBox.node,
+          childBox.x,
+          childBox.y,
+          childBox.width,
+          childBox.height,
+          defs,
+        ),
+      );
 
       return `<g id="${safeId}"${opacityAttr}${rotateAttr}>${bgRect}${childrenSvg.length > 0 ? `<g${clipAttr}>${childrenSvg.join("")}</g>` : ""}</g>`;
     }
@@ -598,21 +783,78 @@ export function renderDesignToSvg(
   doc: DesignDocument,
   options: {
     readonly frameId?: DesignNodeId | undefined;
+    readonly nodeIds?: ReadonlyArray<DesignNodeId> | undefined;
     readonly padding?: number | undefined;
+    readonly transparent?: boolean | undefined;
   } = {},
 ): DesignSvgExportResult {
   const padding = options.padding ?? 24;
   const background = extractSolidColor(doc.background) ?? DEFAULT_CANVAS_BG;
   const defs: Array<string> = [];
 
-  if (options.frameId !== undefined) {
-    const target = doc.nodes[options.frameId];
-    if (target !== undefined) {
-      const width = Math.max(1, Math.round(target.width));
-      const height = Math.max(1, Math.round(target.height));
-      const body = renderNodeSvg(doc, target, 0, 0, target.width, target.height, defs);
+  const requestedIds =
+    options.nodeIds !== undefined && options.nodeIds.length > 0
+      ? options.nodeIds
+      : options.frameId !== undefined
+        ? [options.frameId]
+        : null;
+
+  if (requestedIds !== null) {
+    const targets = resolveExportTargets(doc, requestedIds);
+    if (targets.length === 1) {
+      const targetBox = targets[0]!;
+      const width = Math.max(1, Math.round(targetBox.width));
+      const height = Math.max(1, Math.round(targetBox.height));
+      const body = renderNodeSvg(
+        doc,
+        targetBox.node,
+        0,
+        0,
+        targetBox.width,
+        targetBox.height,
+        defs,
+      );
       const defsBlock = defs.length > 0 ? `<defs>${defs.join("")}</defs>` : "";
-      const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defsBlock}<rect width="${width}" height="${height}" fill="${escapeHtml(background)}" />${body}</svg>`;
+      const bgRect =
+        options.transparent === true
+          ? ""
+          : `<rect width="${width}" height="${height}" fill="${escapeHtml(background)}" />`;
+      const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defsBlock}${bgRect}${body}</svg>`;
+      return { svg, width, height };
+    }
+    if (targets.length > 1) {
+      const selectionPadding = options.padding ?? 0;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const box of targets) {
+        minX = Math.min(minX, box.x);
+        minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.width);
+        maxY = Math.max(maxY, box.y + box.height);
+      }
+      const width = Math.max(1, Math.round(maxX - minX + selectionPadding * 2));
+      const height = Math.max(1, Math.round(maxY - minY + selectionPadding * 2));
+      const body = targets
+        .map((box) =>
+          renderNodeSvg(
+            doc,
+            box.node,
+            box.x - minX + selectionPadding,
+            box.y - minY + selectionPadding,
+            box.width,
+            box.height,
+            defs,
+          ),
+        )
+        .join("");
+      const defsBlock = defs.length > 0 ? `<defs>${defs.join("")}</defs>` : "";
+      const bgRect =
+        options.transparent === true
+          ? ""
+          : `<rect width="${width}" height="${height}" fill="${escapeHtml(background)}" />`;
+      const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defsBlock}${bgRect}${body}</svg>`;
       return { svg, width, height };
     }
   }

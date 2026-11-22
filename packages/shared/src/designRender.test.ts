@@ -87,4 +87,95 @@ describe("designRender", () => {
     expect(cleaned).not.toContain("foreignObject");
     expect(cleaned).toContain('<path d="M0 0"/>');
   });
+
+  it("exports individual nested components and multi-node selections with transparent backgrounds", () => {
+    const mutated = applyDesignMutations(emptyDesignDocument("#10141c"), [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("page"),
+          type: "frame",
+          name: "Page",
+          x: 0,
+          y: 0,
+          width: 800,
+          height: 400,
+          fill: "#0f172a",
+          layout: { direction: "horizontal", gap: 20, padding: 24 },
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("card-a"),
+          type: "frame",
+          name: "Starter",
+          parentId: DesignNodeId.make("page"),
+          width: 240,
+          height: 300,
+          fill: "#1e293b",
+          radius: 16,
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("title-a"),
+          type: "text",
+          name: "Starter Title",
+          parentId: DesignNodeId.make("card-a"),
+          x: 16,
+          y: 16,
+          width: 180,
+          height: 28,
+          text: "Starter",
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("card-b"),
+          type: "frame",
+          name: "Pro",
+          parentId: DesignNodeId.make("page"),
+          width: 260,
+          height: 300,
+          fill: "#312e81",
+          radius: 16,
+        },
+      },
+    ]);
+    expect(mutated.ok).toBe(true);
+    if (!mutated.ok) return;
+
+    const singleSvg = renderDesignToSvg(mutated.document, {
+      nodeIds: [DesignNodeId.make("card-a"), DesignNodeId.make("title-a")],
+      transparent: true,
+    });
+    expect(singleSvg.width).toBe(240);
+    expect(singleSvg.height).toBe(300);
+    expect(singleSvg.svg).not.toContain('fill="#10141c"');
+    expect(singleSvg.svg).toContain('id="Starter"');
+    expect(singleSvg.svg).not.toContain('id="Pro"');
+
+    const multiSvg = renderDesignToSvg(mutated.document, {
+      nodeIds: [DesignNodeId.make("card-a"), DesignNodeId.make("card-b")],
+      transparent: true,
+    });
+    // Two horizontal cards (240 + 20 gap + 260 = 520)
+    expect(multiSvg.width).toBe(520);
+    expect(multiSvg.height).toBe(300);
+    expect(multiSvg.svg).toContain('id="Starter"');
+    expect(multiSvg.svg).toContain('id="Pro"');
+
+    const singleHtml = renderDesignToHtml(mutated.document, {
+      nodeIds: [DesignNodeId.make("card-a")],
+      transparent: true,
+    });
+    expect(singleHtml.width).toBe(240);
+    expect(singleHtml.height).toBe(300);
+    expect(singleHtml.html).toContain("background: transparent");
+    expect(singleHtml.html).toContain("Starter");
+    expect(singleHtml.html).not.toContain("Pro");
+  });
 });

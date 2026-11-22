@@ -31,6 +31,28 @@ import { type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { cn } from "~/lib/utils";
+import { normalizeSelectedNodeIds } from "./designEditorTypes";
+
+function collectVisibleLayerIds(
+  doc: DesignDocument,
+  collapsedIds: ReadonlySet<string>,
+): ReadonlyArray<DesignNodeId> {
+  const ordered: Array<DesignNodeId> = [];
+  const visit = (id: DesignNodeId) => {
+    const node = doc.nodes[id];
+    if (node === undefined) return;
+    ordered.push(id);
+    if (node.type === "frame" && !collapsedIds.has(id)) {
+      for (const childId of node.childIds) {
+        visit(childId);
+      }
+    }
+  };
+  for (const rootId of doc.rootIds) {
+    visit(rootId);
+  }
+  return ordered;
+}
 
 function NodeTypeIcon({ type }: { readonly type: DesignNode["type"] }) {
   const cls = "size-3.5 shrink-0 text-muted-foreground/80";
@@ -117,11 +139,11 @@ function LayerRow({
   doc,
   nodeId,
   depth,
-  selectedId,
+  selectedIdSet,
   renamingId,
   collapsedIds,
   onToggleCollapse,
-  onSelect,
+  onRowClick,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -133,11 +155,11 @@ function LayerRow({
   readonly doc: DesignDocument;
   readonly nodeId: DesignNodeId;
   readonly depth: number;
-  readonly selectedId: DesignNodeId | null;
+  readonly selectedIdSet: ReadonlySet<string>;
   readonly renamingId: DesignNodeId | null;
   readonly collapsedIds: ReadonlySet<string>;
   readonly onToggleCollapse: (id: DesignNodeId) => void;
-  readonly onSelect: (id: DesignNodeId) => void;
+  readonly onRowClick: (event: ReactMouseEvent<HTMLDivElement>, id: DesignNodeId) => void;
   readonly onStartRename: (id: DesignNodeId) => void;
   readonly onCommitRename: (node: DesignNode, nextName: string) => void;
   readonly onCancelRename: () => void;
@@ -153,7 +175,7 @@ function LayerRow({
   if (node === undefined) return null;
 
   const isRenaming = renamingId === node.id;
-  const isSelected = selectedId === node.id;
+  const isSelected = selectedIdSet.has(node.id);
   const isFrame = node.type === "frame";
   const hasChildren = isFrame && node.childIds.length > 0;
   const isCollapsed = collapsedIds.has(node.id);
@@ -169,7 +191,7 @@ function LayerRow({
           isHidden && "opacity-45",
         )}
         style={{ paddingLeft: `${depth * 12 + 6}px` }}
-        onClick={() => onSelect(node.id)}
+        onClick={(event) => onRowClick(event, node.id)}
         onDoubleClick={(event) => {
           event.stopPropagation();
           onStartRename(node.id);
@@ -257,11 +279,11 @@ function LayerRow({
               doc={doc}
               nodeId={childId}
               depth={depth + 1}
-              selectedId={selectedId}
+              selectedIdSet={selectedIdSet}
               renamingId={renamingId}
               collapsedIds={collapsedIds}
               onToggleCollapse={onToggleCollapse}
-              onSelect={onSelect}
+              onRowClick={onRowClick}
               onStartRename={onStartRename}
               onCommitRename={onCommitRename}
               onCancelRename={onCancelRename}
@@ -279,14 +301,14 @@ function LayerRow({
 export function DesignLayersPanel({
   doc,
   width,
-  selectedId,
+  selectedIds,
   renamingId,
   currentRevision,
   revisions,
   revisionsLoading,
   activeTab,
   onTabChange,
-  onSelect,
+  onSelectIds,
   onStartRename,
   onRename,
   onCancelRename,
@@ -298,14 +320,14 @@ export function DesignLayersPanel({
 }: {
   readonly doc: DesignDocument;
   readonly width: number;
-  readonly selectedId: DesignNodeId | null;
+  readonly selectedIds: ReadonlyArray<DesignNodeId>;
   readonly renamingId: DesignNodeId | null;
   readonly currentRevision: number;
   readonly revisions: ReadonlyArray<T3ObjectRevisionSummary>;
   readonly revisionsLoading: boolean;
   readonly activeTab: "layers" | "history";
   readonly onTabChange: (tab: "layers" | "history") => void;
-  readonly onSelect: (id: DesignNodeId | null) => void;
+  readonly onSelectIds: (ids: ReadonlyArray<DesignNodeId>) => void;
   readonly onStartRename: (id: DesignNodeId) => void;
   readonly onRename: (node: DesignNode, nextName: string) => void;
   readonly onCancelRename: () => void;
@@ -318,6 +340,29 @@ export function DesignLayersPanel({
   readonly onRestoreRevision: (revision: number) => void;
 }) {
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const selectedIdSet = new Set<string>(selectedIds);
+
+  const handleRowClick = (event: ReactMouseEvent<HTMLDivElement>, id: DesignNodeId) => {
+    if (event.shiftKey && selectedIds.length > 0) {
+      const flat = collectVisibleLayerIds(doc, collapsedIds);
+      const anchorId = selectedIds[selectedIds.length - 1]!;
+      const startIndex = flat.indexOf(anchorId);
+      const endIndex = flat.indexOf(id);
+      if (startIndex >= 0 && endIndex >= 0) {
+        const [from, to] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+        onSelectIds(normalizeSelectedNodeIds(doc, flat.slice(from, to + 1)));
+        return;
+      }
+    }
+    if (event.metaKey || event.ctrlKey) {
+      const next = selectedIds.includes(id)
+        ? selectedIds.filter((item) => item !== id)
+        : normalizeSelectedNodeIds(doc, [...selectedIds, id]);
+      onSelectIds(next);
+      return;
+    }
+    onSelectIds([id]);
+  };
 
   const toggleCollapse = (id: DesignNodeId) => {
     setCollapsedIds((prev) => {
@@ -372,11 +417,11 @@ export function DesignLayersPanel({
                   doc={doc}
                   nodeId={rootId}
                   depth={0}
-                  selectedId={selectedId}
+                  selectedIdSet={selectedIdSet}
                   renamingId={renamingId}
                   collapsedIds={collapsedIds}
                   onToggleCollapse={toggleCollapse}
-                  onSelect={(id) => onSelect(id)}
+                  onRowClick={handleRowClick}
                   onStartRename={onStartRename}
                   onCommitRename={(node, nextName) => {
                     onRename(node, nextName);

@@ -79,7 +79,9 @@ describe("leaferSceneAdapter", () => {
     expect(parseFrameLabelNodeId(tree[0]?.name)).toBe(DesignNodeId.make("card"));
 
     const card = tree[1];
-    expect(card?.tag).toBe("Box");
+    expect(card?.tag).toBe("Frame");
+    expect(card?.hitChildren).toBe(true);
+    expect(card?.hitSelf).toBe(true);
     expect(card?.flow).toBe("y");
     expect(card?.gap).toBe("auto");
     expect(card?.padding).toEqual([20, 20, 20, 20]);
@@ -89,6 +91,7 @@ describe("leaferSceneAdapter", () => {
     expect(title?.tag).toBe("Text");
     expect(title?.autoWidth).toBe(1);
     expect(title?.text).toBe("Hello Leafer");
+    expect(title?.hitBox).toBe(true);
 
     const icon = card?.children?.[1];
     expect(icon?.tag).toBe("Image");
@@ -140,5 +143,64 @@ describe("leaferSceneAdapter", () => {
     expect(parseFrameLabelNodeId("label:")).toBeNull();
     expect(parseFrameLabelNodeId("hero-frame")).toBeNull();
     expect(parseFrameLabelNodeId(undefined)).toBeNull();
+  });
+
+  it("keeps empty root frames clickable and allows direct selection inside nested frames", () => {
+    const mutated = applyDesignMutations(emptyDesignDocument("#0f1117"), [
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("empty-artboard"),
+          type: "frame",
+          name: "Empty",
+          width: 400,
+          height: 300,
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("page"),
+          type: "frame",
+          name: "Page",
+          x: 500,
+          width: 800,
+          height: 600,
+        },
+      },
+      {
+        op: "add",
+        node: {
+          id: DesignNodeId.make("nested-card"),
+          type: "frame",
+          name: "Card",
+          parentId: DesignNodeId.make("page"),
+          x: 40,
+          y: 40,
+          width: 240,
+          height: 160,
+          fill: "#18181b",
+        },
+      },
+    ]);
+    expect(mutated.ok).toBe(true);
+    if (!mutated.ok) return;
+
+    const tree = designDocumentToLeaferTree(mutated.document);
+    const emptyArtboard = tree.find((item) => item.id === "empty-artboard");
+    expect(emptyArtboard?.tag).toBe("Frame");
+    expect(emptyArtboard?.fill).toBe("");
+    expect(emptyArtboard?.hitChildren).toBe(true);
+    expect(emptyArtboard?.hitSelf).toBe(true);
+
+    const page = tree.find((item) => item.id === "page");
+    expect(page?.tag).toBe("Frame");
+    expect(page?.hitChildren).toBe(true);
+    expect(page?.hitSelf).toBe(true);
+
+    const nestedCard = page?.children?.[0];
+    expect(nestedCard?.tag).toBe("Box");
+    expect(nestedCard?.hitChildren).toBe(true);
+    expect(nestedCard?.hitSelf).toBe(true);
   });
 });

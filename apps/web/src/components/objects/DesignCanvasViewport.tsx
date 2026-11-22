@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   EditorEvent,
+  EditorGroupEvent,
   EditorMoveEvent,
   EditorRotateEvent,
   EditorScaleEvent,
@@ -19,10 +20,12 @@ import {
   App,
   DragEvent,
   Group,
+  Leafer,
   MoveEvent,
   PointerEvent as LeaferPointerEvent,
   ZoomEvent,
   type IUI,
+  type IUIInputData,
 } from "leafer-ui";
 import { useGT } from "gt-react";
 import {
@@ -41,6 +44,7 @@ import {
   clampBubblePosition,
   isEditableTarget,
   makeNodeInputForTool,
+  normalizeSelectedNodeIds,
   type DesignDrawTool,
   type DesignTool,
   type NodeBounds,
@@ -50,6 +54,7 @@ import {
 } from "./designEditorTypes";
 import {
   designDocumentToLeaferTree,
+  designNodeToLeaferInput,
   extractTransformTargets,
   FRAME_LABEL_OFFSET_Y,
   parseFrameLabelNodeId,
@@ -61,13 +66,20 @@ export interface DesignCanvasHandle {
   readonly zoomIn: () => void;
   readonly zoomOut: () => void;
   readonly getNodeAnchorWorld: (id: DesignNodeId) => Point2D | null;
+  readonly getViewportCenterWorld: () => Point2D;
   readonly startRename: (id: DesignNodeId) => void;
+  readonly isEditingText: () => boolean;
+  readonly exportNodesToPng: (
+    nodeIds: ReadonlyArray<DesignNodeId> | null,
+    options?: { readonly transparent?: boolean; readonly scale?: number },
+  ) => Promise<Blob | null>;
 }
 
 export type DesignCanvasContextMenuRequest =
   | {
       readonly kind: "node";
       readonly nodeId: DesignNodeId;
+      readonly nodeIds: ReadonlyArray<DesignNodeId>;
       readonly clientX: number;
       readonly clientY: number;
       readonly worldX: number;
@@ -121,14 +133,33 @@ function clearEditorHover(app: App): void {
   (app.editor as { hoverTarget: IUI | null }).hoverTarget = null;
 }
 
+function sameNodeIdList(a: ReadonlyArray<DesignNodeId>, b: ReadonlyArray<DesignNodeId>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function readEditorSelectedIds(app: App, doc: DesignDocument): ReadonlyArray<DesignNodeId> {
+  const raw: Array<DesignNodeId> = [];
+  for (const item of app.editor.list) {
+    if (typeof item.id === "string" && item.id in doc.nodes) {
+      raw.push(item.id as DesignNodeId);
+    }
+  }
+  return normalizeSelectedNodeIds(doc, raw);
+}
+
 function syncFrameLabelAppearance(
   labels: ReadonlyMap<string, IUI>,
-  selectedId: DesignNodeId | null,
+  selectedIds: ReadonlyArray<DesignNodeId>,
   renamingNodeId: DesignNodeId | null,
 ): void {
+  const selectedSet = new Set<string>(selectedIds);
   for (const [frameId, label] of labels) {
     label.set({
-      fill: frameId === selectedId ? "#60a5fa" : "#71717a",
+      fill: selectedSet.has(frameId) ? "#60a5fa" : "#71717a",
       visible: frameId !== renamingNodeId,
     });
   }
@@ -155,10 +186,48 @@ function findDocumentNodeId(target: unknown, doc: DesignDocument): DesignNodeId 
   return null;
 }
 
+function findDeepUnlockedNodeId(
+  picked: { readonly target?: unknown; readonly path?: { readonly list?: ReadonlyArray<unknown> } },
+  doc: DesignDocument,
+): DesignNodeId | null {
+  const pathList = picked.path?.list;
+  if (Array.isArray(pathList) && pathList.length > 0) {
+    for (const leaf of pathList) {
+      const id = findDocumentNodeId(leaf, doc);
+      if (id === null) continue;
+      const node = doc.nodes[id];
+      if (node === undefined || node.visible === false || node.locked === true) continue;
+      if (node.type === "frame" && node.parentId === null && node.childIds.length > 0) {
+        continue;
+      }
+      return id;
+    }
+  }
+  const fallbackId = findDocumentNodeId(picked.target, doc);
+  if (fallbackId === null) return null;
+  const node = doc.nodes[fallbackId];
+  return node !== undefined && node.visible !== false && node.locked !== true ? fallbackId : null;
+}
+
+function applySelectionToEditor(
+  app: App,
+  contentLayer: Group,
+  ids: ReadonlyArray<DesignNodeId>,
+): void {
+  const targets: Array<IUI> = [];
+  for (const id of ids) {
+    const leaf = contentLayer.findId(id) as IUI | undefined;
+    if (leaf !== undefined) {
+      targets.push(leaf);
+    }
+  }
+  app.editor.target = targets;
+}
+
 export function DesignCanvasViewport({
   doc,
   tool,
-  selectedId,
+  selectedIds,
   pickActive,
   selectionAnchorWorld,
   selectionOverlay,
@@ -167,7 +236,7 @@ export function DesignCanvasViewport({
   handleRef,
   onViewportChange,
   onViewportSizeChange,
-  onSelect,
+  onSelectIds,
   onPickNode,
   onAddNode,
   onCommitOps,
@@ -175,7 +244,7 @@ export function DesignCanvasViewport({
 }: {
   readonly doc: DesignDocument;
   readonly tool: DesignTool;
-  readonly selectedId: DesignNodeId | null;
+  readonly selectedIds: ReadonlyArray<DesignNodeId>;
   readonly pickActive: boolean;
   readonly selectionAnchorWorld: Point2D | null;
   readonly selectionOverlay: ReactNode;
@@ -184,7 +253,7 @@ export function DesignCanvasViewport({
   readonly handleRef: { current: DesignCanvasHandle | null };
   readonly onViewportChange: (next: ViewportTransform) => void;
   readonly onViewportSizeChange: (size: ViewportSize) => void;
-  readonly onSelect: (id: DesignNodeId | null) => void;
+  readonly onSelectIds: (ids: ReadonlyArray<DesignNodeId>) => void;
   readonly onPickNode: (id: DesignNodeId | null, anchorWorld: Point2D | null) => void;
   readonly onAddNode: (input: DesignNodeInput) => void;
   readonly onCommitOps: (ops: ReadonlyArray<DesignMutationOp>, summary: string) => void;
@@ -212,13 +281,13 @@ export function DesignCanvasViewport({
   const latestRef = useRef({
     doc,
     tool,
-    selectedId,
+    selectedIds,
     pickActive,
     spacePressed,
     inlineRename,
     onViewportChange,
     onViewportSizeChange,
-    onSelect,
+    onSelectIds,
     onPickNode,
     onAddNode,
     onCommitOps,
@@ -230,13 +299,13 @@ export function DesignCanvasViewport({
     latestRef.current = {
       doc,
       tool,
-      selectedId,
+      selectedIds,
       pickActive,
       spacePressed,
       inlineRename,
       onViewportChange,
       onViewportSizeChange,
-      onSelect,
+      onSelectIds,
       onPickNode,
       onAddNode,
       onCommitOps,
@@ -291,6 +360,7 @@ export function DesignCanvasViewport({
         hover: true,
         boxSelect: true,
         multipleSelect: true,
+        skipNested: true,
         rotateable: true,
         skewable: false,
         openInner: "double",
@@ -478,19 +548,29 @@ export function DesignCanvasViewport({
 
     app.editor.on(EditorEvent.SELECT, (event: EditorEvent) => {
       if (syncingSelectionRef.current || latestRef.current.pickActive) return;
-      const first = event.list[0];
-      const nextId =
-        first !== undefined &&
-        typeof first.id === "string" &&
-        first.id in latestRef.current.doc.nodes
-          ? (first.id as DesignNodeId)
-          : null;
-      latestRef.current.onSelect(nextId);
+      const activeDoc = latestRef.current.doc;
+      const rawIds: Array<DesignNodeId> = [];
+      for (const item of event.list) {
+        if (typeof item.id === "string" && item.id in activeDoc.nodes) {
+          rawIds.push(item.id as DesignNodeId);
+        }
+      }
+      const nextIds = normalizeSelectedNodeIds(activeDoc, rawIds);
+      if (!sameNodeIdList(nextIds, latestRef.current.selectedIds)) {
+        latestRef.current.onSelectIds(nextIds);
+      }
     });
 
     app.editor.on(EditorMoveEvent.MOVE, markDirty);
     app.editor.on(EditorScaleEvent.SCALE, markDirty);
     app.editor.on(EditorRotateEvent.ROTATE, markDirty);
+    app.editor.on(EditorGroupEvent.CLOSE, (event: EditorGroupEvent) => {
+      // Leafer's closeGroup() sets `hitChildren = false`, which would permanently block
+      // direct clicks on children inside frames after a double-click + deselect.
+      if (event.editTarget !== undefined) {
+        event.editTarget.hitChildren = true;
+      }
+    });
     app.editor.on(DragEvent.END, flushDirtyTransforms);
     app.on(LeaferPointerEvent.UP, flushDirtyTransforms);
 
@@ -523,15 +603,52 @@ export function DesignCanvasViewport({
       ) {
         return;
       }
-      const labelNodeId = findFrameLabelNodeId(event.target, latestRef.current.doc);
+      const activeDoc = latestRef.current.doc;
+      const labelNodeId = findFrameLabelNodeId(event.target, activeDoc);
       if (labelNodeId === null) return;
-      const frameLeaf = contentLayer.findId(labelNodeId) as IUI | undefined;
-      if (frameLeaf !== undefined) {
-        syncingSelectionRef.current = true;
-        app.editor.target = frameLeaf;
-        syncingSelectionRef.current = false;
+      const currentIds = latestRef.current.selectedIds;
+      const nextIds = event.shiftKey
+        ? currentIds.includes(labelNodeId)
+          ? currentIds.filter((id) => id !== labelNodeId)
+          : normalizeSelectedNodeIds(activeDoc, [...currentIds, labelNodeId])
+        : [labelNodeId];
+      syncingSelectionRef.current = true;
+      applySelectionToEditor(app, contentLayer, nextIds);
+      syncingSelectionRef.current = false;
+      latestRef.current.onSelectIds(nextIds);
+    });
+
+    // Listen on `app` (including sky/editBox) so Cmd/Ctrl+Click deep-selects even when an
+    // enclosing parent frame is already selected and covered by the editor selection box.
+    app.on(LeaferPointerEvent.DOWN, (event: LeaferPointerEvent) => {
+      if (
+        !event.left ||
+        !(event.metaKey || event.ctrlKey) ||
+        latestRef.current.pickActive ||
+        latestRef.current.spacePressed ||
+        latestRef.current.tool !== "select" ||
+        editingTextRef.current
+      ) {
+        return;
       }
-      latestRef.current.onSelect(labelNodeId);
+      if ((event.target as { pointType?: unknown } | undefined)?.pointType !== undefined) {
+        return;
+      }
+      const activeDoc = latestRef.current.doc;
+      if (findFrameLabelNodeId(event.target, activeDoc) !== null) return;
+      const picked = app.tree.pick({ x: event.x, y: event.y }, { ignoreHittable: true });
+      const deepId = findDeepUnlockedNodeId(picked, activeDoc);
+      if (deepId === null) return;
+      const currentIds = latestRef.current.selectedIds;
+      const nextIds = event.shiftKey
+        ? currentIds.includes(deepId)
+          ? currentIds.filter((id) => id !== deepId)
+          : normalizeSelectedNodeIds(activeDoc, [...currentIds, deepId])
+        : [deepId];
+      syncingSelectionRef.current = true;
+      applySelectionToEditor(app, contentLayer, nextIds);
+      syncingSelectionRef.current = false;
+      latestRef.current.onSelectIds(nextIds);
     });
 
     app.tree.on(LeaferPointerEvent.DOUBLE_TAP, (event: LeaferPointerEvent) => {
@@ -550,7 +667,10 @@ export function DesignCanvasViewport({
 
     app.tree.on(LeaferPointerEvent.TAP, (event: LeaferPointerEvent) => {
       if (!latestRef.current.pickActive || latestRef.current.spacePressed) return;
-      const nodeId = findDocumentNodeId(event.target, latestRef.current.doc);
+      const activeDoc = latestRef.current.doc;
+      const deepPick = app.tree.pick({ x: event.x, y: event.y }, { ignoreHittable: true });
+      const nodeId =
+        findDeepUnlockedNodeId(deepPick, activeDoc) ?? findDocumentNodeId(event.target, activeDoc);
       if (nodeId === null) {
         latestRef.current.onPickNode(null, null);
         return;
@@ -567,6 +687,136 @@ export function DesignCanvasViewport({
         latestRef.current.onPickNode(nodeId, null);
       }
     });
+
+    const exportNodesToPng = async (
+      nodeIds: ReadonlyArray<DesignNodeId> | null,
+      options?: { readonly transparent?: boolean; readonly scale?: number },
+    ): Promise<Blob | null> => {
+      const activeDoc = latestRef.current.doc;
+      const isFullCanvas = nodeIds === null;
+      const targetIds = isFullCanvas
+        ? activeDoc.rootIds.filter((id) => activeDoc.nodes[id]?.visible !== false)
+        : normalizeSelectedNodeIds(activeDoc, nodeIds);
+      if (targetIds.length === 0) return null;
+
+      interface ExportItemSpec {
+        readonly id: DesignNodeId;
+        readonly renderBounds: {
+          readonly x: number;
+          readonly y: number;
+          readonly width: number;
+          readonly height: number;
+        };
+        readonly originX: number;
+        readonly originY: number;
+        readonly boxWidth: number;
+        readonly boxHeight: number;
+      }
+
+      const specs: Array<ExportItemSpec> = [];
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+
+      for (const id of targetIds) {
+        const node = activeDoc.nodes[id];
+        if (node === undefined) continue;
+        const leaf = contentLayer.findId(id) as IUI | undefined;
+        if (leaf !== undefined) {
+          const rb = leaf.getBounds("render", "page");
+          const worldOrigin = leaf.getWorldPoint({ x: 0, y: 0 });
+          const pageOrigin = contentLayer.getInnerPoint(worldOrigin);
+          const boxWidth = Math.max(1, leaf.boxBounds.width || node.width);
+          const boxHeight = Math.max(1, leaf.boxBounds.height || node.height);
+          specs.push({
+            id,
+            renderBounds: rb,
+            originX: pageOrigin.x,
+            originY: pageOrigin.y,
+            boxWidth,
+            boxHeight,
+          });
+          minX = Math.min(minX, rb.x);
+          minY = Math.min(minY, rb.y);
+          maxX = Math.max(maxX, rb.x + rb.width);
+          maxY = Math.max(maxY, rb.y + rb.height);
+        } else {
+          specs.push({
+            id,
+            renderBounds: { x: node.x, y: node.y, width: node.width, height: node.height },
+            originX: node.x,
+            originY: node.y,
+            boxWidth: Math.max(1, node.width),
+            boxHeight: Math.max(1, node.height),
+          });
+          minX = Math.min(minX, node.x);
+          minY = Math.min(minY, node.y);
+          maxX = Math.max(maxX, node.x + node.width);
+          maxY = Math.max(maxY, node.y + node.height);
+        }
+      }
+
+      if (specs.length === 0 || !Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+
+      const padding = isFullCanvas ? 24 : 0;
+      const exportWidth = Math.max(1, Math.ceil(maxX - minX + padding * 2));
+      const exportHeight = Math.max(1, Math.ceil(maxY - minY + padding * 2));
+      const requestedScale = options?.scale ?? 2;
+      const maxDim = Math.max(exportWidth, exportHeight);
+      const pixelRatio = Math.max(1, Math.min(requestedScale, Math.floor(8192 / maxDim) || 1));
+
+      const builtItems: Array<IUIInputData> = [];
+      for (const spec of specs) {
+        const input = designNodeToLeaferInput(activeDoc, spec.id, false);
+        if (input === null) continue;
+        builtItems.push({
+          ...input,
+          x: spec.originX - minX + padding,
+          y: spec.originY - minY + padding,
+          width: spec.boxWidth,
+          height: spec.boxHeight,
+          visible: true,
+          editable: false,
+        });
+      }
+      if (builtItems.length === 0) return null;
+
+      const transparent = options?.transparent ?? !isFullCanvas;
+      const backgroundFill = transparent
+        ? ""
+        : (activeDoc.background ??
+          (typeof window !== "undefined"
+            ? window.getComputedStyle(mountEl).backgroundColor || "#0f1117"
+            : "#0f1117"));
+
+      const offscreenCanvas = document.createElement("canvas");
+      const exportLeafer = new Leafer({
+        view: offscreenCanvas,
+        width: exportWidth,
+        height: exportHeight,
+        pixelRatio,
+        fill: backgroundFill,
+      });
+
+      try {
+        exportLeafer.add(builtItems as never);
+        exportLeafer.updateLayout();
+        exportLeafer.forceRender(undefined, true);
+        // Allow one frame for any image/SVG data URLs to paint onto the offscreen canvas.
+        await new Promise<void>((resolve) => {
+          window.requestAnimationFrame(() => resolve());
+        });
+        exportLeafer.updateLayout();
+        exportLeafer.forceRender(undefined, true);
+
+        return await new Promise<Blob | null>((resolve) => {
+          offscreenCanvas.toBlob((blob) => resolve(blob), "image/png");
+        });
+      } finally {
+        exportLeafer.destroy();
+      }
+    };
 
     handleRef.current = {
       fitView: () => {
@@ -606,7 +856,17 @@ export function DesignCanvasViewport({
           y: (bounds.y + bounds.height - vp.y) / vp.zoom,
         };
       },
+      getViewportCenterWorld: () => {
+        const rect = mountEl.getBoundingClientRect();
+        const vp = readTreeViewport(app);
+        return {
+          x: (rect.width / 2 - vp.x) / vp.zoom,
+          y: (rect.height / 2 - vp.y) / vp.zoom,
+        };
+      },
       startRename: openInlineRename,
+      isEditingText: () => editingTextRef.current,
+      exportNodesToPng,
     };
 
     return () => {
@@ -649,15 +909,12 @@ export function DesignCanvasViewport({
       latestRef.current.onViewportChange(next);
     }
 
-    const activeSelectedId = latestRef.current.selectedId;
+    const activeSelectedIds = normalizeSelectedNodeIds(doc, latestRef.current.selectedIds);
     const activeRenameId = latestRef.current.inlineRename?.nodeId ?? null;
-    syncFrameLabelAppearance(frameLabelsRef.current, activeSelectedId, activeRenameId);
+    syncFrameLabelAppearance(frameLabelsRef.current, activeSelectedIds, activeRenameId);
 
-    if (activeSelectedId !== null && !latestRef.current.pickActive) {
-      const target = contentLayer.findId(activeSelectedId) as IUI | undefined;
-      if (target !== undefined) {
-        app.editor.target = target;
-      }
+    if (activeSelectedIds.length > 0 && !latestRef.current.pickActive) {
+      applySelectionToEditor(app, contentLayer, activeSelectedIds);
     }
     syncingSelectionRef.current = false;
   }, [doc]);
@@ -670,17 +927,21 @@ export function DesignCanvasViewport({
     const contentLayer = contentLayerRef.current;
     if (app === null || contentLayer === null || editingTextRef.current) return;
 
-    syncingSelectionRef.current = true;
-    if (selectedId === null || pickActive) {
-      app.editor.target = [];
-    } else {
-      const target = contentLayer.findId(selectedId) as IUI | undefined;
-      app.editor.target = target ?? [];
+    const currentEditorIds = readEditorSelectedIds(app, latestRef.current.doc);
+    if (pickActive || selectedIds.length === 0) {
+      if (currentEditorIds.length > 0 || app.editor.list.length > 0) {
+        syncingSelectionRef.current = true;
+        app.editor.target = [];
+        syncingSelectionRef.current = false;
+      }
+    } else if (!sameNodeIdList(currentEditorIds, selectedIds)) {
+      syncingSelectionRef.current = true;
+      applySelectionToEditor(app, contentLayer, selectedIds);
+      syncingSelectionRef.current = false;
     }
-    syncingSelectionRef.current = false;
 
-    syncFrameLabelAppearance(frameLabelsRef.current, selectedId, renamingNodeId);
-  }, [selectedId, pickActive, renamingNodeId]);
+    syncFrameLabelAppearance(frameLabelsRef.current, selectedIds, renamingNodeId);
+  }, [selectedIds, pickActive, renamingNodeId]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses and selects inline rename input after mounting (including when triggered from a closing context menu)
   useEffect(() => {
@@ -784,7 +1045,8 @@ export function DesignCanvasViewport({
     const vp = readTreeViewport(app);
     const worldX = (event.clientX - rect.left - vp.x) / vp.zoom;
     const worldY = (event.clientY - rect.top - vp.y) / vp.zoom;
-    const selectedNode = selectedId === null ? undefined : doc.nodes[selectedId];
+    const primarySelectedId = selectedIds.length === 1 ? selectedIds[0]! : null;
+    const selectedNode = primarySelectedId === null ? undefined : doc.nodes[primarySelectedId];
     const targetParentId =
       tool !== "frame" && selectedNode?.type === "frame" ? selectedNode.id : null;
     const parentFrame = targetParentId !== null ? doc.nodes[targetParentId] : undefined;
@@ -840,21 +1102,27 @@ export function DesignCanvasViewport({
     const worldX = (localX - vp.x) / vp.zoom;
     const worldY = (localY - vp.y) / vp.zoom;
 
-    const picked = app.tree.pick({ x: localX, y: localY });
-    const nodeId = findDocumentNodeId(picked.target, doc);
+    const picked =
+      event.metaKey || event.ctrlKey
+        ? app.tree.pick({ x: localX, y: localY }, { ignoreHittable: true })
+        : app.tree.pick({ x: localX, y: localY });
+    const nodeId =
+      event.metaKey || event.ctrlKey
+        ? (findDeepUnlockedNodeId(picked, doc) ?? findDocumentNodeId(picked.target, doc))
+        : findDocumentNodeId(picked.target, doc);
     if (nodeId !== null) {
-      if (selectedId !== nodeId && !pickActive) {
-        const leaf = contentLayer.findId(nodeId) as IUI | undefined;
-        if (leaf !== undefined) {
-          syncingSelectionRef.current = true;
-          app.editor.target = leaf;
-          syncingSelectionRef.current = false;
-        }
-        onSelect(nodeId);
+      const alreadyInSelection = selectedIds.includes(nodeId);
+      const nextIds = alreadyInSelection ? selectedIds : [nodeId];
+      if (!alreadyInSelection && !pickActive) {
+        syncingSelectionRef.current = true;
+        applySelectionToEditor(app, contentLayer, nextIds);
+        syncingSelectionRef.current = false;
+        onSelectIds(nextIds);
       }
       onContextMenu({
         kind: "node",
         nodeId,
+        nodeIds: nextIds,
         clientX: event.clientX,
         clientY: event.clientY,
         worldX,
