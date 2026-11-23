@@ -21,6 +21,7 @@ import { type PendingUserInput } from "../../session-logic";
 import { promptSuggestionToAccept } from "./usePromptSuggestion";
 import {
   type EnvironmentContextRecord,
+  type ObjectContextRecord,
   type PreviewAnnotationPayload,
   type ThreadContextRecord,
 } from "@t3tools/contracts";
@@ -77,6 +78,10 @@ export function composerCommandKeyHandler(input: {
     target: ChatComposerProps["composerDraftTarget"],
     records: ReadonlyArray<EnvironmentContextRecord>,
   ) => void;
+  readonly setComposerDraftObjectContexts: (
+    target: ChatComposerProps["composerDraftTarget"],
+    records: ReadonlyArray<ObjectContextRecord>,
+  ) => void;
   readonly setComposerCursor: Dispatch<SetStateAction<number>>;
   readonly setComposerTrigger: (trigger: ComposerTrigger | null) => void;
   readonly setComposerHighlightedItemId: Dispatch<SetStateAction<string | null>>;
@@ -126,6 +131,7 @@ export function composerCommandKeyHandler(input: {
     setComposerDraftPrompt,
     setComposerDraftThreadContexts,
     setComposerDraftEnvironmentContexts,
+    setComposerDraftObjectContexts,
     setComposerCursor,
     setComposerTrigger,
     setComposerHighlightedItemId,
@@ -153,6 +159,7 @@ export function composerCommandKeyHandler(input: {
     setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     setComposerDraftThreadContexts(composerDraftTarget, mentions.threadContexts);
     setComposerDraftEnvironmentContexts(composerDraftTarget, mentions.environmentContexts);
+    setComposerDraftObjectContexts(composerDraftTarget, mentions.objectContexts ?? []);
     setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
     setComposerTrigger(null);
     setComposerHighlightedItemId(null);

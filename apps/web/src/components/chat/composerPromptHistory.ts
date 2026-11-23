@@ -1,6 +1,7 @@
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import {
   EnvironmentContextRecord,
+  ObjectContextRecord,
   type OrchestrationMessageContext,
   ThreadContextRecord,
 } from "@t3tools/contracts";
@@ -18,19 +19,24 @@ const TRAILING_LEGACY_CONTEXT =
 
 const isThreadContextRecord = Schema.is(ThreadContextRecord);
 const isEnvironmentContextRecord = Schema.is(EnvironmentContextRecord);
+const isObjectContextRecord = Schema.is(ObjectContextRecord);
 
 type ComposerPromptHistoryMessage = Parameters<typeof resolveUserMessagePresentation>[0] & {
   readonly id: string;
   readonly context?: OrchestrationMessageContext | undefined;
 };
 
-/** Thread and machine mentions; the draft holds these records, so recall can restore their chips. */
+/** Thread, machine, and object mentions; the draft holds these records, so recall can restore their chips. */
 export interface ComposerPromptHistoryMentions {
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
   readonly environmentContexts: ReadonlyArray<EnvironmentContextRecord>;
+  readonly objectContexts?: ReadonlyArray<ObjectContextRecord>;
 }
 
-const NO_MENTIONS: ComposerPromptHistoryMentions = { threadContexts: [], environmentContexts: [] };
+const NO_MENTIONS: ComposerPromptHistoryMentions = {
+  threadContexts: [],
+  environmentContexts: [],
+};
 
 interface ComposerPromptHistoryEntry {
   readonly id: string;
@@ -148,19 +154,24 @@ export function recallComposerMessage(
   const records = message.context?.records ?? [];
   const threadRecords = records.filter(isThreadContextRecord);
   const environmentRecords = records.filter(isEnvironmentContextRecord);
+  const objectRecords = records.filter(isObjectContextRecord);
   const prompt = recallableComposerPrompt(
     message.text,
-    new Set([...threadRecords, ...environmentRecords].map((record) => record.contextId)),
+    new Set(
+      [...threadRecords, ...environmentRecords, ...objectRecords].map((record) => record.contextId),
+    ),
   );
   // A record whose chip is gone from the text would put the chip back when written to the draft.
   const referenced = new Set<string>(
     collectComposerContextReferences(prompt).map((reference) => reference.contextId),
   );
+  const keptObjects = objectRecords.filter((record) => referenced.has(record.contextId));
   return {
     prompt,
     mentions: {
       threadContexts: threadRecords.filter((record) => referenced.has(record.contextId)),
       environmentContexts: environmentRecords.filter((record) => referenced.has(record.contextId)),
+      ...(keptObjects.length > 0 ? { objectContexts: keptObjects } : {}),
     },
   };
 }

@@ -1,4 +1,4 @@
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, T3ObjectId } from "@t3tools/contracts";
 import { createContext, type MouseEvent } from "react";
 
 export interface ComposerContextActions {
@@ -9,6 +9,11 @@ export interface ComposerContextActions {
   expandVideo: (fileId: string) => void;
   openFile: (fileId: string) => void;
   openMention: (path: string) => void;
+  openObject?: (target: {
+    readonly objectId: T3ObjectId;
+    readonly environmentId: EnvironmentId;
+    readonly title: string;
+  }) => void;
   openPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
 }
 

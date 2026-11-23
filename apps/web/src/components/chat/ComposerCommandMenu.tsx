@@ -14,6 +14,8 @@ import {
   type ScopedThreadRef,
   type ServerProviderSkill,
   type ServerProviderSlashCommand,
+  type T3ObjectId,
+  type T3ObjectKind,
 } from "@t3tools/contracts";
 import {
   BlocksIcon,
@@ -21,6 +23,7 @@ import {
   MessagesSquareIcon,
   PackageIcon,
   SettingsIcon,
+  ShapesIcon,
   UserRoundIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -90,6 +93,16 @@ export type ComposerCommandItem =
       type: "environment";
       environmentId: EnvironmentId;
       machine: EnvironmentMachineKind;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "object";
+      environmentId: EnvironmentId;
+      objectId: T3ObjectId;
+      objectKind: T3ObjectKind;
+      revision: number;
       label: string;
       description: string;
     }
@@ -250,6 +263,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
           aria-hidden="true"
           className="size-4 shrink-0 text-secondary-label"
         />
+      ) : null}
+      {props.item.type === "object" ? (
+        <ShapesIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
       ) : null}
       {props.item.type === "model" ? (
         <ProviderInstanceIcon

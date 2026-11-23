@@ -118,6 +118,16 @@ const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<strin
     label: "vps",
     environmentId: "environment-vps",
   },
+  object: {
+    ...base,
+    kind: "object",
+    label: "Landing Hero",
+    environmentId: "environment-1",
+    objectId: "obj-1",
+    objectKind: "design",
+    title: "Landing Hero",
+    revision: 3,
+  },
   response: {
     ...base,
     kind: "response",

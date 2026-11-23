@@ -374,6 +374,15 @@ function formatComposerContextProviderPayload(record: KnownComposerContextRecord
         `environmentId: ${record.environmentId}`,
         "The user means this machine. Not linked here yet: call t3_environment_link with this environmentId. Linked: pass it as environmentId, or target.environmentId for delegate_task.",
       ].join("\n");
+    case "object":
+      return [
+        `title: ${record.title}`,
+        `kind: ${record.objectKind}`,
+        `objectId: ${record.objectId}`,
+        `environmentId: ${record.environmentId}`,
+        ...(record.revision !== undefined ? [`revision: ${record.revision}`] : []),
+        `The user referenced this T3 Object. Inspect its latest state with t3_object_read(${JSON.stringify({ id: record.objectId })}) before answering or editing it.`,
+      ].join("\n");
   }
 }
 

@@ -27,6 +27,7 @@ import {
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import ChatMarkdown from "../ChatMarkdown";
 import { EnvironmentContextChip } from "../EnvironmentContextChip";
+import { ObjectContextChip } from "../ObjectContextChip";
 import { ThreadContextChip } from "../ThreadContextChip";
 import { ResponseReplyCard } from "./AssistantCitationChip";
 import { MessageCircleIcon, MousePointerClickIcon, PaintbrushIcon } from "lucide-react";
@@ -69,6 +70,20 @@ import {
 } from "../../reviewCommentContext";
 import { TimelineRowCtx } from "./timelineRowContext";
 import { userMessageFileLabel } from "./TimelineUserMessageRow.logic";
+
+function UserMessageObjectChip(props: {
+  record: Extract<KnownComposerContextRecord, { kind: "object" }>;
+  copyMarkdown: string;
+}) {
+  const ctx = use(TimelineRowCtx);
+  return (
+    <ObjectContextChip
+      record={props.record}
+      threadRef={ctx.threadRef}
+      copyMarkdown={props.copyMarkdown}
+    />
+  );
+}
 
 function UserMessageMentionChip(props: {
   record: Extract<KnownComposerContextRecord, { kind: "mention" }>;
@@ -360,6 +375,16 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
       render: (record, context) =>
         record.kind === "environment" ? (
           <EnvironmentContextChip record={record} copyMarkdown={context.copyMarkdown} />
+        ) : (
+          <UnavailableUserMessageContextChip {...context} />
+        ),
+    },
+    {
+      kind: "object",
+      canRender: (record) => record.kind === "object",
+      render: (record, context) =>
+        record.kind === "object" ? (
+          <UserMessageObjectChip record={record} copyMarkdown={context.copyMarkdown} />
         ) : (
           <UnavailableUserMessageContextChip {...context} />
         ),

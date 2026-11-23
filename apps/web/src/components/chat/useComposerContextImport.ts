@@ -126,6 +126,7 @@ export function useComposerContextImport(input: {
   const addComposerDraftEnvironmentContexts = useComposerDraftStore(
     (store) => store.addEnvironmentContexts,
   );
+  const addComposerDraftObjectContexts = useComposerDraftStore((store) => store.addObjectContexts);
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, { reportFailure: false });
   const loadThreadTranscript = useAtomCommand(orchestrationEnvironment.threadTranscript, {
     reportFailure: false,
@@ -425,6 +426,14 @@ export function useComposerContextImport(input: {
           // but not in an answer to an agent's question, which carries no machines.
           if (questionAttachmentTarget !== null) break;
           addComposerDraftEnvironmentContexts(composerDraftTarget, [record], {
+            appendReference: false,
+          });
+          rewritten.set(record.contextId, record.contextId);
+          break;
+        }
+        case "object": {
+          if (record.environmentId !== environmentId) break;
+          addComposerDraftObjectContexts(composerDraftTarget, [record], {
             appendReference: false,
           });
           rewritten.set(record.contextId, record.contextId);

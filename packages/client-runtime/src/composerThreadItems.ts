@@ -3,6 +3,9 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type ScopedThreadRef,
+  type T3ObjectId,
+  type T3ObjectKind,
+  type T3ObjectSummary,
   type ThreadId,
 } from "@t3tools/contracts";
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
@@ -137,5 +140,56 @@ export function matchComposerEnvironmentItems(
       machine: environment.machine,
       label: environment.label,
       description: resolve(msg("Machine", { $context: "noun, search result type" })),
+    }));
+}
+
+const COMPOSER_OBJECT_RESULT_LIMIT = 5;
+
+export interface ComposerObjectItem {
+  readonly id: string;
+  readonly type: "object";
+  readonly environmentId: EnvironmentId;
+  readonly objectId: T3ObjectId;
+  readonly objectKind: T3ObjectKind;
+  readonly revision: number;
+  readonly label: string;
+  readonly description: string;
+}
+
+/**
+ * Non-archived T3 Objects matching the `@` query, ordered by most recently updated.
+ * Matches by title, object kind (e.g. "design"), or the keyword "object"; bare `@` stays
+ * a workspace file picker.
+ */
+export function matchComposerObjectItems(
+  input: {
+    readonly objects: ReadonlyArray<T3ObjectSummary>;
+    readonly environmentId: EnvironmentId;
+    readonly query: string;
+  },
+  resolve: MFunctionType = mFallback,
+): ComposerObjectItem[] {
+  const query = input.query.trim().toLowerCase();
+  if (query.length === 0) return [];
+  return input.objects
+    .filter(
+      (item) =>
+        item.archivedAt === null &&
+        (item.title.toLowerCase().includes(query) ||
+          item.kind.toLowerCase().includes(query) ||
+          "object".includes(query) ||
+          "objeto".includes(query)),
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, COMPOSER_OBJECT_RESULT_LIMIT)
+    .map((item) => ({
+      id: `object:${input.environmentId}:${item.id}`,
+      type: "object",
+      environmentId: input.environmentId,
+      objectId: item.id,
+      objectKind: item.kind,
+      revision: item.revision,
+      label: item.title,
+      description: `${resolve(msg("Object", { $context: "noun, search result type" }))} · v${item.revision}`,
     }));
 }

@@ -263,6 +263,11 @@ export async function rewindToMessage(input: {
     store.addEnvironmentContexts(draftTarget, mentions.environmentContexts, {
       appendReference: false,
     });
+    if (mentions.objectContexts && mentions.objectContexts.length > 0) {
+      store.addObjectContexts(draftTarget, mentions.objectContexts, {
+        appendReference: false,
+      });
+    }
     const images: ComposerImageAttachment[] = [];
     const restoredFiles: ComposerFileAttachment[] = [];
     files.forEach((file, index) => {
@@ -340,6 +345,10 @@ export function restoreComposerDraft(
       snapshot.environmentContexts,
       (record) => record.contextId,
     ),
+  );
+  store.setObjectContexts(
+    draftTarget,
+    withRestored(current?.objectContexts, snapshot.objectContexts, (record) => record.contextId),
   );
   return images;
 }

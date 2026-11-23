@@ -27,6 +27,7 @@ import {
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   RunId,
+  T3ObjectId,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ShellSnapshot,
@@ -102,6 +103,7 @@ import { insertInlineContextReference } from "./lib/composerContextReferences";
 import {
   buildMessageContext,
   environmentContextRecord,
+  objectContextRecord,
   terminalContextReference,
 } from "./lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
@@ -848,6 +850,49 @@ describe("composerDraftStore environment contexts", () => {
     const store = useComposerDraftStore.getState();
     store.addEnvironmentContexts(threadRef, [vps]);
     store.setEnvironmentContexts(threadRef, []);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
+  });
+
+  it("references a T3 Object once, survives persistence, and clears cleanly", () => {
+    const store = useComposerDraftStore.getState();
+    const design = objectContextRecord({
+      environmentId: TEST_ENVIRONMENT_ID,
+      objectId: T3ObjectId.make("obj-hero"),
+      objectKind: "design",
+      title: "Landing [Hero]",
+      revision: 3,
+    });
+    store.setPrompt(threadRef, "Update");
+    store.addObjectContexts(threadRef, [design]);
+    store.addObjectContexts(threadRef, [{ ...design, title: "Renamed", label: "Renamed" }]);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.objectContexts).toEqual([design]);
+    expect(draft?.prompt).toBe(
+      `Update [${design.label}](t3-context://v1/object/${design.contextId}) `,
+    );
+
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    const hydrated = merge(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+      useComposerDraftStore.getInitialState(),
+    );
+    const restored = hydrated.draftsByThreadKey[scopedThreadKey(threadRef)];
+    expect(restored?.objectContexts).toEqual([design]);
+
+    expect(
+      buildMessageContext({
+        terminalContexts: [],
+        reviewComments: [],
+        previewAnnotations: [],
+        objectContexts: restored?.objectContexts ?? [],
+      })?.records,
+    ).toEqual([design]);
+
+    store.setPrompt(threadRef, "");
+    store.setObjectContexts(threadRef, []);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 });

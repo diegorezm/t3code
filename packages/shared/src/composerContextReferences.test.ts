@@ -436,6 +436,34 @@ describe("provider projection", () => {
     expect(projected).not.toMatch(/https?:/);
   });
 
+  it("projects a referenced T3 Object with metadata and t3_object_read hint", () => {
+    const projected = projectComposerContextForProvider({
+      text: "Update the hero in [Landing Hero](t3-context://v1/object/object_obj_1)",
+      records: [
+        {
+          version: 1,
+          kind: "object",
+          contextId: ctx("object_obj_1"),
+          label: "Landing Hero",
+          environmentId: "environment-1" as never,
+          objectId: "obj-1" as never,
+          objectKind: "design",
+          title: "Landing Hero",
+          revision: 4,
+        },
+      ],
+    });
+    expect(
+      projected.startsWith("Update the hero in [Object: Landing Hero; ref=object_obj_1]"),
+    ).toBe(true);
+    expect(projected).toContain('<context kind="object" id="object_obj_1">');
+    expect(projected).toContain("title: Landing Hero");
+    expect(projected).toContain("kind: design");
+    expect(projected).toContain("objectId: obj-1");
+    expect(projected).toContain("revision: 4");
+    expect(projected).toContain('t3_object_read({"id":"obj-1"})');
+  });
+
   it("marks duplicate identities unavailable instead of choosing one payload", () => {
     const projected = projectComposerContextForProvider({
       text: "[log](t3-context://v1/terminal/ctx_t)",

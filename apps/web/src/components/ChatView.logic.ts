@@ -31,6 +31,7 @@ import {
   ProjectId,
   type MessageId,
   type ModelSelection,
+  type ObjectContextRecord,
   type OrchestrationMessageContext,
   type PreviewAnnotationPayload,
   ProviderDriverKind,
@@ -1381,6 +1382,7 @@ export interface ComposerSendContents {
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
   readonly environmentContexts: ReadonlyArray<EnvironmentContextRecord>;
+  readonly objectContexts?: ReadonlyArray<ObjectContextRecord>;
   /** The response the message replies to. `prompt` already leads with its reference. */
   readonly replyTo: ResponseContextRecord | null;
 }
@@ -1411,6 +1413,7 @@ export function snapshotComposerSend(contents: ComposerSendContents) {
     reviewComments: [...contents.reviewComments],
     threadContexts: [...contents.threadContexts],
     environmentContexts: [...contents.environmentContexts],
+    objectContexts: [...(contents.objectContexts ?? [])],
     replyTo: contents.replyTo,
     messageText,
     /** What a failed send puts back in the composer: the reply returns above it, not in the text. */

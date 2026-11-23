@@ -10,11 +10,13 @@ import {
   GuestShareId,
   NonNegativeInt,
   PositiveInt,
+  T3ObjectId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
 import { GUEST_MESSAGE_MAX_LENGTH, GUEST_NAME_MAX_LENGTH } from "./guestShare.ts";
+import { T3ObjectKind } from "./t3Object.ts";
 
 /** Image and file records reference `ChatAttachment` ids, never bytes. */
 
@@ -29,6 +31,7 @@ export const COMPOSER_CONTEXT_KINDS = [
   "skill",
   "thread",
   "environment",
+  "object",
   "response",
 ] as const;
 export type KnownComposerContextKind = (typeof COMPOSER_CONTEXT_KINDS)[number];
@@ -231,6 +234,21 @@ export const EnvironmentContextRecord = Schema.Struct({
 export type EnvironmentContextRecord = typeof EnvironmentContextRecord.Type;
 
 /**
+ * A T3 Object (e.g. a Design Canvas) referenced in chat. Only lightweight metadata travels:
+ * the agent inspects its latest state by id via `t3_object_read`.
+ */
+export const ObjectContextRecord = Schema.Struct({
+  ...recordBase,
+  kind: Schema.Literal("object"),
+  environmentId: EnvironmentId,
+  objectId: T3ObjectId,
+  objectKind: T3ObjectKind,
+  title: ContextLabel,
+  revision: Schema.optional(PositiveInt),
+});
+export type ObjectContextRecord = typeof ObjectContextRecord.Type;
+
+/**
  * An earlier assistant response the user is replying to. Only its identity and opening travel:
  * the agent rereads the rest by item id, so a reply costs the same however long the response is.
  */
@@ -285,6 +303,7 @@ export const KnownComposerContextRecord = Schema.Union([
   SkillContextRecord,
   ThreadContextRecord,
   EnvironmentContextRecord,
+  ObjectContextRecord,
   ResponseContextRecord,
 ]);
 export type KnownComposerContextRecord = typeof KnownComposerContextRecord.Type;

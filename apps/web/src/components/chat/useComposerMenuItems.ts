@@ -5,6 +5,7 @@ import {
 } from "@t3tools/client-runtime/thread-pull-requests";
 import {
   matchComposerEnvironmentItems,
+  matchComposerObjectItems,
   matchComposerThreadItems,
 } from "@t3tools/client-runtime/composerThreadItems";
 import { useAtomValue } from "@effect/atom-react";
@@ -36,6 +37,7 @@ import {
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useVisibleThreadShells } from "~/state/entities";
 import { useEnvironmentIdentities, useEnvironmentMachines } from "~/state/environments";
+import { useObjectsEnvironmentState } from "~/state/objects";
 import { offersLinkedEnvironmentsAtom } from "~/state/peerLinks";
 import {
   pullRequestEnvironment,
@@ -126,6 +128,7 @@ export function useComposerMenuItems({
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
   const environmentThreadShells = useVisibleThreadShells(isPathTrigger);
+  const { state: objectsState } = useObjectsEnvironmentState(isPathTrigger ? environmentId : null);
   // Mounts older settled threads matching the mention, here and on linked machines, which shells
   // may leave out.
   useThreadSearch(
@@ -235,6 +238,14 @@ export function useComposerMenuItems({
               messages,
             )
           : []),
+        ...matchComposerObjectItems(
+          {
+            objects: Object.values(objectsState.summariesById),
+            environmentId,
+            query: composerTrigger.query,
+          },
+          messages,
+        ),
         ...matchComposerModelItems({
           instanceEntries: modelMentions.instanceEntries,
           modelOptionsByInstance: modelMentions.modelOptionsByInstance,

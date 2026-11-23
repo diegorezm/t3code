@@ -1,8 +1,9 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, T3ObjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   matchComposerEnvironmentItems,
+  matchComposerObjectItems,
   matchComposerThreadItems,
   type ComposerThreadCandidate,
 } from "./composerThreadItems.ts";
@@ -178,5 +179,58 @@ describe("matchComposerEnvironmentItems", () => {
         query: "vps",
       }).map((item) => item.machine),
     ).toEqual(["cloud"]);
+  });
+});
+
+describe("matchComposerObjectItems", () => {
+  const envId = EnvironmentId.make("env-here");
+  const objects = [
+    {
+      id: T3ObjectId.make("obj-old"),
+      kind: "design" as const,
+      title: "Pricing Hero",
+      revision: 2,
+      nodeCount: 4,
+      createdByThreadId: null,
+      createdAt: "2026-11-20T10:00:00.000Z",
+      updatedAt: "2026-11-20T10:00:00.000Z",
+      archivedAt: null,
+    },
+    {
+      id: T3ObjectId.make("obj-new"),
+      kind: "design" as const,
+      title: "Pricing Modal",
+      revision: 5,
+      nodeCount: 8,
+      createdByThreadId: null,
+      createdAt: "2026-11-21T10:00:00.000Z",
+      updatedAt: "2026-11-21T12:00:00.000Z",
+      archivedAt: null,
+    },
+    {
+      id: T3ObjectId.make("obj-archived"),
+      kind: "design" as const,
+      title: "Pricing Old Draft",
+      revision: 1,
+      nodeCount: 1,
+      createdByThreadId: null,
+      createdAt: "2026-11-22T10:00:00.000Z",
+      updatedAt: "2026-11-22T10:00:00.000Z",
+      archivedAt: "2026-11-22T11:00:00.000Z",
+    },
+  ];
+
+  it("matches non-archived objects by title or kind, ordered by most recently updated", () => {
+    expect(
+      matchComposerObjectItems({ objects, environmentId: envId, query: "pricing" }).map(
+        (item) => item.objectId,
+      ),
+    ).toEqual(["obj-new", "obj-old"]);
+    expect(
+      matchComposerObjectItems({ objects, environmentId: envId, query: "design" }).map(
+        (item) => item.objectId,
+      ),
+    ).toEqual(["obj-new", "obj-old"]);
+    expect(matchComposerObjectItems({ objects, environmentId: envId, query: "" })).toEqual([]);
   });
 });

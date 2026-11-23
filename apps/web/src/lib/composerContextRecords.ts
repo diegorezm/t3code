@@ -17,11 +17,14 @@ import type {
   ImageContextRecord,
   KnownComposerContextRecord,
   MessageId,
+  ObjectContextRecord,
   OrchestrationMessageContext,
   PreviewAnnotationContextRecord,
   PreviewAnnotationPayload,
   ResponseContextRecord,
   ReviewCommentContextRecord,
+  T3ObjectId,
+  T3ObjectKind,
   TerminalContextRecord,
   ThreadContextRecord,
   ThreadId,
@@ -381,6 +384,32 @@ export function environmentContextRecord(
   };
 }
 
+/** One record per T3 Object: mentioning the same object twice reuses the chip. */
+export function objectContextReference(record: ObjectContextRecord): ComposerContextReference {
+  return { kind: "object", contextId: record.contextId, label: record.label };
+}
+
+export function objectContextRecord(input: {
+  readonly environmentId: EnvironmentId;
+  readonly objectId: T3ObjectId;
+  readonly objectKind: T3ObjectKind;
+  readonly title: string;
+  readonly revision?: number | undefined;
+}): ObjectContextRecord {
+  const label = sanitizeComposerContextLabel(input.title, "object");
+  return {
+    version: 1,
+    kind: "object",
+    contextId: toKindScopedComposerContextId("object", input.objectId),
+    label,
+    environmentId: input.environmentId,
+    objectId: input.objectId,
+    objectKind: input.objectKind,
+    title: label,
+    ...(input.revision !== undefined && input.revision > 0 ? { revision: input.revision } : {}),
+  };
+}
+
 export function terminalContextRecord(context: TerminalContextDraft): TerminalContextRecord {
   return {
     version: 1,
@@ -529,6 +558,7 @@ export function buildMessageContext(input: {
   previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
   environmentContexts?: ReadonlyArray<EnvironmentContextRecord>;
+  objectContexts?: ReadonlyArray<ObjectContextRecord>;
   replyTo?: ResponseContextRecord | null;
   attachments?: ReadonlyArray<BoundComposerAttachment>;
 }): OrchestrationMessageContext | undefined {
@@ -542,6 +572,7 @@ export function buildMessageContext(input: {
     ...input.reviewComments.map(reviewCommentContextRecord),
     ...(input.threadContexts ?? []),
     ...(input.environmentContexts ?? []),
+    ...(input.objectContexts ?? []),
     ...(input.replyTo ? [input.replyTo] : []),
     ...input.previewAnnotations.map((annotation) =>
       previewAnnotationContextRecord(annotation, {

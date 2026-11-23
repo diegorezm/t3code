@@ -11,6 +11,7 @@ import {
   MonitorIcon,
   MousePointerClickIcon,
   QuoteIcon,
+  ShapesIcon,
   TerminalIcon,
 } from "lucide-react";
 import type { ReactElement } from "react";
@@ -40,6 +41,7 @@ const CONTEXT_REFERENCE_ICONS: Record<
   "review-comment": () => <MessageCircleIcon />,
   thread: () => <MessagesSquareIcon />,
   environment: () => <MonitorIcon />,
+  object: () => <ShapesIcon />,
 };
 
 // Mirrors the editor's chip: only a draft record of the same kind resolves a reference.
